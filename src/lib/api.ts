@@ -234,14 +234,60 @@ export async function fetchHistoryData(range: string = '24h'): Promise<{ filter:
   return res.json();
 }
 
-export async function fetchGoogleSheets(url?: string): Promise<GoogleSheetsData> {
-  const query = url ? `?url=${encodeURIComponent(url)}` : '';
-  const res = await fetch(`/api/sheets${query}`);
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Error connecting to Google Sheets' }));
-    throw new Error(err.error || `HTTP ${res.status}`);
+export async function fetchGoogleSheets(url?: string, webhookUrl?: string): Promise<GoogleSheetsData> {
+  const params = new URLSearchParams();
+  if (url) params.append('url', url);
+  if (webhookUrl) params.append('webhookUrl', webhookUrl);
+  const query = params.toString() ? `?${params.toString()}` : '';
+
+  try {
+    const res = await fetch(`/api/sheets${query}`);
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return {
+      connected: false,
+      url: url || '',
+      webhookUrl: webhookUrl || '',
+      spreadsheetId: null,
+      lastUpdate: null,
+      rowsCount: 0,
+      records: [],
+      error: err.message || 'Không thể kết nối đến máy chủ',
+    };
   }
-  return res.json();
+}
+
+export async function syncToGoogleSheets(target: 'telemetry' | 'settings' | 'all', webhookUrl?: string): Promise<{ success: boolean; message: string; syncedAt?: string; needWebhook?: boolean }> {
+  try {
+    const res = await fetch('/api/sheets/sync-now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, webhookUrl }),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err.message || 'Lỗi gửi yêu cầu đồng bộ',
+    };
+  }
+}
+
+export async function saveGoogleSheetsConfig(url: string, webhookUrl?: string): Promise<{ success: boolean; message: string; sheetsData?: GoogleSheetsData }> {
+  try {
+    const res = await fetch('/api/sheets/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, webhookUrl }),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err.message || 'Lỗi lưu cấu hình Google Sheets',
+    };
+  }
 }
 
 export async function requestEcosystemAnalysis(): Promise<{ success: boolean; analysis: EcosystemAnalysis }> {

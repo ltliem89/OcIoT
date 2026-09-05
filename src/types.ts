@@ -325,8 +325,12 @@ export interface AlertItem {
 export interface GoogleSheetsData {
   connected: boolean;
   url: string;
+  webhookUrl?: string;
   spreadsheetId: string | null;
   lastUpdate: string | null;
+  lastSyncTime?: string | null;
+  lastSyncStatus?: 'SUCCESS' | 'ERROR' | 'IDLE';
+  lastSyncMessage?: string;
   rowsCount: number;
   records: SensorData[];
   message?: string;
@@ -339,6 +343,10 @@ export interface SystemSettings {
   deviceId: string;
   offlineTimeoutSeconds: number;
   googleSheetsUrl: string;
+  googleSheetsWebhookUrl?: string;
+  lastSheetsSyncTime?: string | null;
+  lastSheetsSyncStatus?: 'SUCCESS' | 'ERROR' | 'IDLE';
+  lastSheetsSyncMessage?: string;
 
   tdsMin: number;
   tdsMax: number;

@@ -1816,124 +1816,324 @@ app.get('/api/iot/history', (req, res) => {
   });
 });
 
+// Google Sheets Status & Data Fetch Endpoint
 app.get('/api/sheets', async (req, res) => {
-  const sheetUrl = (req.query.url as string) || systemSettings.googleSheetsUrl;
-  if (!sheetUrl) {
+  let sheetUrl = (req.query.url as string) || systemSettings.googleSheetsUrl || '';
+  let webhookUrl = (req.query.webhookUrl as string) || systemSettings.googleSheetsWebhookUrl || '';
+
+  // Auto-detect if user swapped URLs
+  if (sheetUrl.includes('script.google.com/macros/s/')) {
+    webhookUrl = sheetUrl;
+    if (systemSettings.googleSheetsUrl && !systemSettings.googleSheetsUrl.includes('script.google.com')) {
+      sheetUrl = systemSettings.googleSheetsUrl;
+    }
+  }
+
+  if (webhookUrl) {
+    systemSettings.googleSheetsWebhookUrl = webhookUrl;
+  }
+  if (sheetUrl && !sheetUrl.includes('script.google.com')) {
+    systemSettings.googleSheetsUrl = sheetUrl;
+  }
+  saveStore();
+
+  if (!sheetUrl && !webhookUrl) {
     return res.json({
       connected: false,
       url: '',
+      webhookUrl: '',
       spreadsheetId: null,
       lastUpdate: null,
+      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
       rowsCount: 0,
       records: [],
       error: 'Chưa cấu hình URL Google Sheets',
     });
   }
 
-  try {
-    // Check if user provided Google Apps Script Web App URL
-    if (sheetUrl.includes('script.google.com/macros/s/')) {
-      systemSettings.googleSheetsUrl = sheetUrl;
-      saveStore();
-      return res.json({
-        connected: true,
-        url: sheetUrl,
-        spreadsheetId: 'APPS_SCRIPT_WEBHOOK',
-        lastUpdate: new Date().toISOString(),
-        rowsCount: historyData.length,
-        records: historyData.slice(-50),
-        message: 'Đã kết nối trực tiếp với Google Apps Script Web App (Hỗ trợ 2 chiều Đọc/Ghi 2 Tab)!',
-      });
-    }
-
-    const match = sheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-    if (!match || !match[1]) {
-      return res.status(400).json({
-        connected: false,
-        url: sheetUrl,
-        spreadsheetId: null,
-        error: 'URL Google Sheets không hợp lệ. Vui lòng dán link dạng: https://docs.google.com/spreadsheets/d/.../edit',
-      });
-    }
-
-    const spreadsheetId = match[1];
-    const exportCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
-
-    let rows: string[] = [];
-    let isNewOrEmpty = false;
-
-    try {
-      const response = await fetch(exportCsvUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-      });
-
-      if (!response.ok) {
-        // If export fails (e.g. newly created blank sheet or private), provide specific guidance
-        if (response.status === 401 || response.status === 403 || response.status === 404) {
-          throw new Error(`Google Sheets phản hồi mã ${response.status}. Bạn cần mở Google Sheet, bấm nút [Chia sẻ] (Share) ở góc trên bên phải -> chọn "Bất kỳ ai có đường liên kết" (Anyone with the link) -> cấp quyền "Người xem" hoặc "Người chỉnh sửa".`);
-        }
-        throw new Error(`Google Sheets phản hồi lỗi ${response.status}.`);
-      }
-
-      const csvText = await response.text();
-      rows = csvText.split(/\r?\n/).filter((r) => r.trim().length > 0);
-      if (rows.length <= 1) {
-        isNewOrEmpty = true;
-      }
-    } catch (fetchErr: any) {
-      // If fetching export failed due to empty or permissions, record URL but inform user
-      systemSettings.googleSheetsUrl = sheetUrl;
-      saveStore();
-      return res.status(400).json({
-        connected: false,
-        url: sheetUrl,
-        spreadsheetId,
-        error: fetchErr.message || 'Không thể đọc dữ liệu từ Google Sheets',
-      });
-    }
-
-    const sheetsData: GoogleSheetsData = {
+  // If only webhook URL is present
+  if (webhookUrl && (!sheetUrl || sheetUrl.includes('script.google.com'))) {
+    return res.json({
       connected: true,
-      url: sheetUrl,
-      spreadsheetId,
+      url: sheetUrl || webhookUrl,
+      webhookUrl,
+      spreadsheetId: 'APPS_SCRIPT_WEBHOOK',
       lastUpdate: new Date().toISOString(),
-      rowsCount: Math.max(0, rows.length - 1),
+      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+      rowsCount: historyData.length,
       records: historyData.slice(-50),
-      isNewOrEmpty,
-      message: isNewOrEmpty
-        ? 'Đã kết nối với Bảng tính mới! Bảng tính đang trống, bạn có thể khởi tạo Tab Nhật Ký và Tab Cài Đặt theo hướng dẫn bên dưới.'
-        : `Đã kết nối thành công, đọc được ${Math.max(0, rows.length - 1)} dòng dữ liệu.`,
-    };
+      message: 'Đã kết nối trực tiếp với Google Apps Script Web App (Hỗ trợ 2 chiều Đọc/Ghi 2 Tab)!',
+    });
+  }
 
+  // Extract Spreadsheet ID from Google Sheets URL
+  let spreadsheetId: string | null = null;
+  const match = sheetUrl.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/([a-zA-Z0-9-_]+)/);
+  if (match && match[1]) {
+    spreadsheetId = match[1];
+  } else if (/^[a-zA-Z0-9-_]{30,60}$/.test(sheetUrl.trim())) {
+    spreadsheetId = sheetUrl.trim();
+    sheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
     systemSettings.googleSheetsUrl = sheetUrl;
     saveStore();
-    res.json(sheetsData);
-  } catch (error: any) {
-    res.status(500).json({ connected: false, url: sheetUrl, error: error.message });
+  }
+
+  if (!spreadsheetId) {
+    return res.json({
+      connected: false,
+      url: sheetUrl,
+      webhookUrl,
+      spreadsheetId: null,
+      lastUpdate: null,
+      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+      rowsCount: 0,
+      records: [],
+      error: 'URL Google Sheets không đúng định dạng. Vui lòng dán link dạng: https://docs.google.com/spreadsheets/d/.../edit',
+    });
+  }
+
+  const exportCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
+  let rows: string[] = [];
+  let isNewOrEmpty = false;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    const response = await fetch(exportCsvUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/csv,text/plain,*/*',
+      },
+      signal: controller.signal,
+      redirect: 'follow',
+    });
+    clearTimeout(timeoutId);
+
+    const textResult = await response.text();
+
+    // Check if Google returned an HTML login page (Sheet is private / requires sign-in)
+    if (textResult.includes('<!DOCTYPE html>') || textResult.includes('<html') || textResult.includes('accounts.google.com') || response.status === 401 || response.status === 403) {
+      return res.json({
+        connected: false,
+        url: sheetUrl,
+        webhookUrl,
+        spreadsheetId,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: 'Bảng tính Google Sheets đang ở chế độ Riêng tư (Private). Bạn cần mở Google Sheet -> Bấm nút [Chia sẻ] (Share) ở góc trên bên phải -> Tại mục "Quyền truy cập chung", đổi thành "Bất kỳ ai có đường liên kết" (Anyone with the link) -> Cấp quyền "Người xem" hoặc "Người chỉnh sửa", sau đó bấm Kết Nối Lại.',
+      });
+    }
+
+    if (!response.ok) {
+      return res.json({
+        connected: false,
+        url: sheetUrl,
+        webhookUrl,
+        spreadsheetId,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: `Google Sheets phản hồi mã trạng thái HTTP ${response.status}. Vui lòng kiểm tra lại liên kết.`,
+      });
+    }
+
+    rows = textResult.split(/\r?\n/).filter((r) => r.trim().length > 0);
+    if (rows.length <= 1) {
+      isNewOrEmpty = true;
+    }
+  } catch (fetchErr: any) {
+    return res.json({
+      connected: false,
+      url: sheetUrl,
+      webhookUrl,
+      spreadsheetId,
+      lastUpdate: null,
+      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+      rowsCount: 0,
+      records: [],
+      error: fetchErr.name === 'AbortError'
+        ? 'Kết nối Google Sheets quá thời gian chờ (Timeout). Vui lòng thử lại.'
+        : `Lỗi kết nối tới Google Sheets: ${fetchErr.message || 'Không thể tải bảng tính'}`,
+    });
+  }
+
+  const sheetsData: GoogleSheetsData = {
+    connected: true,
+    url: sheetUrl,
+    webhookUrl,
+    spreadsheetId,
+    lastUpdate: new Date().toISOString(),
+    lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+    lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+    lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+    rowsCount: Math.max(0, rows.length - 1),
+    records: historyData.slice(-50),
+    isNewOrEmpty,
+    message: isNewOrEmpty
+      ? 'Đã kết nối với Bảng tính mới! Bảng tính đang trống, hãy bấm Đẩy Dữ Liệu hoặc nạp CSV bên dưới để khởi tạo 2 Tab.'
+      : `Đã kết nối thành công, đọc được ${Math.max(0, rows.length - 1)} dòng dữ liệu từ Google Sheets.`,
+  };
+
+  res.json(sheetsData);
+});
+
+// Save Google Sheets Configuration
+app.post('/api/sheets/config', (req, res) => {
+  const { url, webhookUrl } = req.body || {};
+  if (url !== undefined) systemSettings.googleSheetsUrl = String(url).trim();
+  if (webhookUrl !== undefined) systemSettings.googleSheetsWebhookUrl = String(webhookUrl).trim();
+  saveStore();
+  res.json({ success: true, message: 'Đã lưu cấu hình Google Sheets thành công!' });
+});
+
+// Real-time Push Data To Google Sheets (Sync Now)
+app.post('/api/sheets/sync-now', async (req, res) => {
+  const { target = 'all', webhookUrl } = req.body || {};
+  const activeWebhook = webhookUrl || systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com') ? systemSettings.googleSheetsUrl : null);
+
+  if (webhookUrl) {
+    systemSettings.googleSheetsWebhookUrl = webhookUrl;
+    saveStore();
+  }
+
+  if (!activeWebhook) {
+    return res.json({
+      success: false,
+      needWebhook: true,
+      message: 'Google Sheets yêu cầu liên kết Webhook (Google Apps Script Web App) để máy chủ tự động đẩy dữ liệu lên bảng tính. Bạn hãy sao chép mã Apps Script ở Tab bên dưới, bấm Triển khai Web App rồi dán link vào ô Webhook, hoặc bấm nút "Tải File CSV" để nạp ngay.',
+    });
+  }
+
+  const syncTimestamp = new Date().toISOString();
+  const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
+
+  try {
+    const payload: Record<string, any> = {
+      action: target === 'settings' ? 'update_settings' : 'sync_all',
+      timestamp: syncTimestamp,
+      tds: latestSensorData.tds,
+      soil_moisture: latestSensorData.soil_moisture,
+      float_low: latestSensorData.float_low,
+      float_high: latestSensorData.float_high,
+      pump1: latestSensorData.pump1,
+      pump2: latestSensorData.pump2,
+      buzzer: latestSensorData.buzzer,
+      note: 'Đồng bộ từ Dashboard EcoFarm',
+      settings: {
+        TDS_MIN: systemSettings.tdsMin,
+        TDS_MAX: systemSettings.tdsMax,
+        TDS_CRITICAL: systemSettings.tdsCritical,
+        DO_AM_DAT_MIN: systemSettings.soilMoistureMin,
+        DO_AM_DAT_MAX: systemSettings.soilMoistureMax,
+        THOI_GIAN_BOM_1_MAX: systemSettings.pump1MaxContinuousMinutes,
+        THOI_GIAN_TUOI_RAU: systemSettings.pump2IrrigationDurationSeconds,
+        KHOANG_NGHI_TUOI: systemSettings.pump2RestIntervalMinutes,
+        TU_DONG_NGAT_KHI_CAN: systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT',
+        COI_BUZZER_CANH_BAO: systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT',
+        CHU_KY_GUI_TIN_ESP: systemSettings.espReportIntervalSeconds,
+        DEVICE_ID: systemSettings.deviceId,
+        DEVICE_KEY: activeKey,
+      },
+    };
+
+    const response = await fetch(activeWebhook, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const textRes = await response.text();
+    let jsonRes: any = {};
+    try {
+      jsonRes = JSON.parse(textRes);
+    } catch {
+      jsonRes = { message: textRes };
+    }
+
+    systemSettings.lastSheetsSyncTime = syncTimestamp;
+    systemSettings.lastSheetsSyncStatus = 'SUCCESS';
+    systemSettings.lastSheetsSyncMessage = 'Đã đồng bộ thành công lên Google Sheets lúc ' + new Date().toLocaleTimeString('vi-VN');
+    saveStore();
+
+    res.json({
+      success: true,
+      message: 'Đã đẩy dữ liệu thành công lên 2 Tab của Google Sheets!',
+      syncedAt: syncTimestamp,
+      details: jsonRes,
+    });
+  } catch (err: any) {
+    systemSettings.lastSheetsSyncTime = syncTimestamp;
+    systemSettings.lastSheetsSyncStatus = 'ERROR';
+    systemSettings.lastSheetsSyncMessage = 'Lỗi đẩy dữ liệu: ' + (err.message || 'Không thể kết nối tới Webhook');
+    saveStore();
+
+    res.json({
+      success: false,
+      message: 'Không thể kết nối đến Webhook Apps Script: ' + err.message,
+    });
   }
 });
 
-// Download/Export Settings as CSV for Tab "CaiDat_HeThong"
+// Download/Export Telemetry History as CSV for Tab 1 "DuLieu_NhatKy"
+app.get('/api/sheets/telemetry-csv', (req, res) => {
+  const csvLines = [
+    'Thời Gian,TDS (ppm),Độ Ẩm Đất (%),Phao Đáy (LOW),Phao Tràn (HIGH),Bơm 1 (Tuần Hoàn),Bơm 2 (Tưới Rau),Còi Buzzer,Ghi Chú Trạng Thái',
+  ];
+
+  historyData.slice(-200).forEach((r) => {
+    const timeStr = new Date(r.timestamp).toLocaleString('vi-VN');
+    const floatLowStr = r.float_low ? 'BÌNH THƯỜNG' : 'CẠN NƯỚC (ALARM)';
+    const floatHighStr = r.float_high ? 'TRÀN BỂ' : 'BÌNH THƯỜNG';
+    const pump1Str = r.pump1 ? 'BẬT' : 'TẮT';
+    const pump2Str = r.pump2 ? 'BẬT' : 'TẮT';
+    const buzzerStr = r.buzzer ? 'BẬT' : 'TẮT';
+    const note = r.tds > systemSettings.tdsMax ? 'TDS Cao' : r.soil_moisture < systemSettings.soilMoistureMin ? 'Đất Khô' : 'Ổn định';
+    csvLines.push(`"${timeStr}",${r.tds},${r.soil_moisture},"${floatLowStr}","${floatHighStr}","${pump1Str}","${pump2Str}","${buzzerStr}","${note}"`);
+  });
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="DuLieu_NhatKy_EcoFarm.csv"');
+  res.send('\uFEFF' + csvLines.join('\r\n'));
+});
+
+// Download/Export Settings as CSV for Tab 2 "CaiDat_HeThong" (Smart 5-column Distribution)
 app.get('/api/sheets/settings-csv', (req, res) => {
   const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
+  const updateTime = new Date().toLocaleString('vi-VN');
+
   const csvLines = [
-    'THONG_SO,GIA_TRI,DON_VI_Y_NGHIA',
-    `TDS_MIN,${systemSettings.tdsMin},ppm - Nguong dinh duong toi thieu`,
-    `TDS_MAX,${systemSettings.tdsMax},ppm - Nguong dinh duong toi da an toan`,
-    `TDS_CRITICAL,${systemSettings.tdsCritical},ppm - Nguong nguy cap`,
-    `DO_AM_DAT_MIN,${systemSettings.soilMoistureMin},% - Duoi nguong nay tu dong bat Bom 2`,
-    `DO_AM_DAT_MAX,${systemSettings.soilMoistureMax},% - Dat nguong nay tu dong ngat Bom 2`,
-    `THOI_GIAN_BOM_1_MAX,${systemSettings.pump1MaxContinuousMinutes},phut - Bom tuan hoan chay lien tuc toi da`,
-    `THOI_GIAN_TUOI_RAU,${systemSettings.pump2IrrigationDurationSeconds},giay - Thoi gian moi dot tuoi rau`,
-    `KHOANG_NGHI_TUOI_RAU,${systemSettings.pump2RestIntervalMinutes},phut - Khoang nghi giua cac dot tuoi`,
-    `TU_DONG_NGAT_KHI_CAN,${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'},Tu dong ngat Bom 1 khi phao day bao can nuoc`,
-    `COI_BUZZER_CANH_BAO,${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'},Keu coi bao dong khi co su co`,
-    `CHU_KY_GUI_TIN_ESP,${systemSettings.espReportIntervalSeconds},giay - Chu ky gui du lieu telemetry`,
-    `CHU_KY_GHI_SHEETS,${systemSettings.espSheetsSyncIntervalSeconds},giay - Chu ky dong bo len Google Sheets`,
-    `DEVICE_ID,${systemSettings.deviceId},Ma dinh danh phan cung ESP32-S3`,
-    `DEVICE_KEY,${activeKey},Khoa xac thuc nap vao firmware ESP32`,
-    `CAMERA_STREAM_URL,${systemSettings.cameraStreamUrl || 'Khong co'},Duong dan luong RTSP/HTTP camera`,
-    `NGAY_CAP_NHAT,${new Date().toISOString()},Thoi diem he thong ghi nhan cau hinh`,
+    'MÃ THÔNG SỐ (KEY),GIÁ TRỊ (VALUE),ĐƠN VỊ & Ý NGHĨA HOẠT ĐỘNG,NHÓM CẤU HÌNH,THỜI GIAN CẬP NHẬT',
+    `TDS_MIN,${systemSettings.tdsMin},ppm - Dưới ngưỡng này kích hoạt cảnh báo thiếu dưỡng chất,[1. DINH DƯỠNG & NƯỚC],"${updateTime}"`,
+    `TDS_MAX,${systemSettings.tdsMax},ppm - Ngưỡng an toàn tối đa cho ốc và cá,[1. DINH DƯỠNG & NƯỚC],"${updateTime}"`,
+    `TDS_CRITICAL,${systemSettings.tdsCritical},ppm - Ngưỡng nguy cấp, còi kêu liên tục,[1. DINH DƯỠNG & NƯỚC],"${updateTime}"`,
+    `DO_AM_DAT_MIN,${systemSettings.soilMoistureMin},% - Dưới ngưỡng này tự động bật Bơm 2 tưới rau,[2. GIÀN RAU & ĐỘ ẨM],"${updateTime}"`,
+    `DO_AM_DAT_MAX,${systemSettings.soilMoistureMax},% - Đạt ngưỡng này tự động ngắt Bơm 2,[2. GIÀN RAU & ĐỘ ẨM],"${updateTime}"`,
+    `THOI_GIAN_TUOI_RAU,${systemSettings.pump2IrrigationDurationSeconds},giây - Thời gian chạy bơm cho mỗi đợt tưới,[2. GIÀN RAU & ĐỘ ẨM],"${updateTime}"`,
+    `KHOANG_NGHI_TUOI,${systemSettings.pump2RestIntervalMinutes},phút - Khoảng nghỉ giữa 2 lần tưới rau liên tiếp,[2. GIÀN RAU & ĐỘ ẨM],"${updateTime}"`,
+    `THOI_GIAN_BOM_1_MAX,${systemSettings.pump1MaxContinuousMinutes},phút - Thời gian Bơm 1 tuần hoàn chạy liên tục tối đa,[3. BƠM TUẦN HOÀN],"${updateTime}"`,
+    `TU_DONG_NGAT_KHI_CAN,${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'},Tự động ngắt Bơm 1 ngay khi phao đáy báo cạn để chống cháy,[4. AN TOÀN & BÁO ĐỘNG],"${updateTime}"`,
+    `COI_BUZZER_CANH_BAO,${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'},Phát còi bíp cảnh báo khi hệ thống gặp sự cố khẩn cấp,[4. AN TOÀN & BÁO ĐỘNG],"${updateTime}"`,
+    `CHU_KY_GUI_TIN_ESP,${systemSettings.espReportIntervalSeconds},giây - Chu kỳ gửi tin telemetry từ ESP32,[5. THIẾT BỊ & PHẦN CỨNG],"${updateTime}"`,
+    `CHU_KY_GHI_SHEETS,${systemSettings.espSheetsSyncIntervalSeconds},giây - Chu kỳ đồng bộ tự động lên Google Sheets,[5. THIẾT BỊ & PHẦN CỨNG],"${updateTime}"`,
+    `DEVICE_ID,"${systemSettings.deviceId}",Mã định danh phần cứng của trạm điều khiển,[5. THIẾT BỊ & PHẦN CỨNG],"${updateTime}"`,
+    `DEVICE_KEY,"${activeKey}",Khóa xác thực bảo mật nạp vào firmware ESP32,[5. THIẾT BỊ & PHẦN CỨNG],"${updateTime}"`,
   ];
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -1941,18 +2141,18 @@ app.get('/api/sheets/settings-csv', (req, res) => {
   res.send('\uFEFF' + csvLines.join('\r\n'));
 });
 
-// Full Google Apps Script Code Generator (Creates 2 tabs & Web App Webhook)
+// Full Google Apps Script Code Generator (Automates 2-Tab creation, smart data layout, & Webhook)
 app.get('/api/sheets/apps-script-code', (req, res) => {
   const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
   const scriptCode = `/**
  * ==============================================================================
  * HỆ THỐNG GIÁM SÁT AQUAPONICS ECOFARM - GOOGLE APPS SCRIPT ĐỒNG BỘ 2 TAB
- * Tab 1: DuLieu_NhatKy (Nhật ký cảm biến đo đạc)
- * Tab 2: CaiDat_HeThong (Thông số cài đặt, ngưỡng, khóa thiết bị)
+ * - Tab 1: DuLieu_NhatKy (Nhật ký cảm biến đo đạc thời gian thực)
+ * - Tab 2: CaiDat_HeThong (Bảng thông số cài đặt phân nhóm thông minh)
  * ==============================================================================
  */
 
-// BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 2 Tab và định dạng đẹp
+// BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 2 Tab và định dạng màu sắc
 function khoiTaoHaiTabEcoFarm() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
@@ -1978,47 +2178,57 @@ function khoiTaoHaiTabEcoFarm() {
   headerRange1.setBackground("#0f172a");
   headerRange1.setFontColor("#38bdf8");
   headerRange1.setFontWeight("bold");
+  headerRange1.setHorizontalAlignment("center");
   sheet1.setFrozenRows(1);
   sheet1.autoResizeColumns(1, headers1.length);
 
-  // 2. TẠO TAB 2: CaiDat_HeThong
+  // 2. TẠO TAB 2: CaiDat_HeThong (5 Cột phân nhóm thông minh)
   var sheet2 = ss.getSheetByName("CaiDat_HeThong");
   if (!sheet2) {
     sheet2 = ss.insertSheet("CaiDat_HeThong", 1);
   }
   sheet2.clear();
-  var headers2 = ["MÃ THÔNG SỐ (KEY)", "GIÁ TRỊ HIỆN TẠI (VALUE)", "ĐƠN VỊ & Ý NGHĨA HOẠT ĐỘNG"];
+  var headers2 = [
+    "MÃ THÔNG SỐ (KEY)",
+    "GIÁ TRỊ HIỆN TẠI (VALUE)",
+    "ĐƠN VỊ & Ý NGHĨA HOẠT ĐỘNG",
+    "NHÓM CẤU HÌNH",
+    "THỜI GIAN CẬP NHẬT"
+  ];
   sheet2.appendRow(headers2);
   var headerRange2 = sheet2.getRange(1, 1, 1, headers2.length);
   headerRange2.setBackground("#1e293b");
   headerRange2.setFontColor("#4ade80");
   headerRange2.setFontWeight("bold");
+  headerRange2.setHorizontalAlignment("center");
   sheet2.setFrozenRows(1);
 
-  // Điền sẵn toàn bộ dữ liệu cài đặt từ hệ thống
+  var nowStr = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss");
+
+  // Nạp sẵn 14 thông số cài đặt chia thành 5 nhóm cấu hình
   var settingsRows = [
-    ["TDS_MIN", ${systemSettings.tdsMin}, "ppm - Dưới ngưỡng này kích hoạt bổ sung vi lượng dinh dưỡng"],
-    ["TDS_MAX", ${systemSettings.tdsMax}, "ppm - Ngưỡng an toàn tối đa cho cá và ốc"],
-    ["TDS_CRITICAL", ${systemSettings.tdsCritical}, "ppm - Ngưỡng nguy cấp, kích hoạt cảnh báo đỏ"],
-    ["DO_AM_DAT_MIN", ${systemSettings.soilMoistureMin}, "% - Dưới ngưỡng này tự động bật Bơm 2 tưới rau"],
-    ["DO_AM_DAT_MAX", ${systemSettings.soilMoistureMax}, "% - Đạt ngưỡng này tự động ngắt Bơm 2"],
-    ["THOI_GIAN_BOM_1_MAX", ${systemSettings.pump1MaxContinuousMinutes}, "phút - Thời gian Bơm 1 tuần hoàn chạy liên tục tối đa"],
-    ["THOI_GIAN_TUOI_RAU", ${systemSettings.pump2IrrigationDurationSeconds}, "giây - Thời gian mỗi đợt bơm tưới giàn rau"],
-    ["KHOANG_NGHI_TUOI", ${systemSettings.pump2RestIntervalMinutes}, "phút - Khoảng nghỉ giữa các đợt tưới"],
-    ["TU_DONG_NGAT_KHI_CAN", "${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'}", "Tự động ngắt Bơm 1 ngay khi phao đáy báo cạn nước"],
-    ["COI_BUZZER_CANH_BAO", "${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'}", "Phát còi bíp cảnh báo khi hệ thống gặp sự cố"],
-    ["CHU_KY_GUI_TIN_ESP", ${systemSettings.espReportIntervalSeconds}, "giây - Chu kỳ gửi tin telemetry từ ESP32"],
-    ["DEVICE_ID", "${systemSettings.deviceId}", "Mã định danh trạm điều khiển phần cứng"],
-    ["DEVICE_KEY", "${activeKey}", "Khóa xác thực bảo mật nạp vào mã C++"],
-    ["NGAY_CAP_NHAT", Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "yyyy-MM-dd HH:mm:ss"), "Thời gian máy chủ ghi nhận cấu hình"]
+    ["TDS_MIN", ${systemSettings.tdsMin}, "ppm - Dưới ngưỡng này cảnh báo thiếu dinh dưỡng", "[1. DINH DƯỠNG & NƯỚC]", nowStr],
+    ["TDS_MAX", ${systemSettings.tdsMax}, "ppm - Ngưỡng an toàn tối đa cho ốc và cá", "[1. DINH DƯỠNG & NƯỚC]", nowStr],
+    ["TDS_CRITICAL", ${systemSettings.tdsCritical}, "ppm - Ngưỡng nguy cấp, kích hoạt cảnh báo đỏ", "[1. DINH DƯỠNG & NƯỚC]", nowStr],
+    ["DO_AM_DAT_MIN", ${systemSettings.soilMoistureMin}, "% - Dưới ngưỡng này tự động bật Bơm 2 tưới rau", "[2. GIÀN RAU & ĐỘ ẨM]", nowStr],
+    ["DO_AM_DAT_MAX", ${systemSettings.soilMoistureMax}, "% - Đạt ngưỡng này tự động ngắt Bơm 2", "[2. GIÀN RAU & ĐỘ ẨM]", nowStr],
+    ["THOI_GIAN_TUOI_RAU", ${systemSettings.pump2IrrigationDurationSeconds}, "giây - Thời gian mỗi đợt bơm tưới giàn rau", "[2. GIÀN RAU & ĐỘ ẨM]", nowStr],
+    ["KHOANG_NGHI_TUOI", ${systemSettings.pump2RestIntervalMinutes}, "phút - Khoảng nghỉ giữa các đợt tưới liên tiếp", "[2. GIÀN RAU & ĐỘ ẨM]", nowStr],
+    ["THOI_GIAN_BOM_1_MAX", ${systemSettings.pump1MaxContinuousMinutes}, "phút - Thời gian Bơm 1 tuần hoàn chạy liên tục tối đa", "[3. BƠM TUẦN HOÀN]", nowStr],
+    ["TU_DONG_NGAT_KHI_CAN", "${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'}", "Tự động ngắt Bơm 1 ngay khi phao đáy báo cạn để chống cháy", "[4. AN TOÀN & BÁO ĐỘNG]", nowStr],
+    ["COI_BUZZER_CANH_BAO", "${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'}", "Phát còi bíp cảnh báo khi hệ thống gặp sự cố khẩn cấp", "[4. AN TOÀN & BÁO ĐỘNG]", nowStr],
+    ["CHU_KY_GUI_TIN_ESP", ${systemSettings.espReportIntervalSeconds}, "giây - Chu kỳ gửi tin telemetry từ ESP32", "[5. THIẾT BỊ & PHẦN CỨNG]", nowStr],
+    ["CHU_KY_GHI_SHEETS", ${systemSettings.espSheetsSyncIntervalSeconds}, "giây - Chu kỳ tự động đồng bộ lên Google Sheets", "[5. THIẾT BỊ & PHẦN CỨNG]", nowStr],
+    ["DEVICE_ID", "${systemSettings.deviceId}", "Mã định danh trạm điều khiển phần cứng", "[5. THIẾT BỊ & PHẦN CỨNG]", nowStr],
+    ["DEVICE_KEY", "${activeKey}", "Khóa xác thực bảo mật nạp vào firmware ESP32", "[5. THIẾT BỊ & PHẦN CỨNG]", nowStr]
   ];
 
   for (var i = 0; i < settingsRows.length; i++) {
     sheet2.appendRow(settingsRows[i]);
   }
-  sheet2.autoResizeColumns(1, 3);
+  sheet2.autoResizeColumns(1, headers2.length);
 
-  // Xóa sheet mặc định nếu có tên "Trang tính 1" hoặc "Sheet1"
+  // Xóa sheet rác mặc định nếu có tên "Trang tính 1" hoặc "Sheet1"
   var defaultSheet = ss.getSheetByName("Trang tính 1") || ss.getSheetByName("Sheet1");
   if (defaultSheet && ss.getSheets().length > 2) {
     ss.deleteSheet(defaultSheet);
@@ -2027,49 +2237,72 @@ function khoiTaoHaiTabEcoFarm() {
   SpreadsheetApp.getUi().alert("✅ Đã khởi tạo thành công 2 Tab: 'DuLieu_NhatKy' và 'CaiDat_HeThong'!");
 }
 
-// BƯỚC 2: Nhận dữ liệu ghi vào Nhật Ký hoặc cập nhật Cài Đặt khi Web gửi sang
+// BƯỚC 2: Nhận dữ liệu gửi từ Webhook để ghi vào Nhật Ký hoặc cập nhật Cài Đặt
 function doPost(e) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var data = JSON.parse(e.postData.contents);
+    var data = {};
+    if (e && e.postData && e.postData.contents) {
+      data = JSON.parse(e.postData.contents);
+    } else if (e && e.parameter) {
+      data = e.parameter;
+    }
 
-    // Xử lý ghi dữ liệu cảm biến
-    if (data.action === "log_telemetry" || data.tds !== undefined) {
+    var nowStr = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss");
+
+    // 1. Ghi nhận dữ liệu cảm biến vào Tab 1: DuLieu_NhatKy
+    if (data.action === "log_telemetry" || data.action === "sync_all" || data.tds !== undefined) {
       var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
       if (!sheet1) {
         khoiTaoHaiTabEcoFarm();
         sheet1 = ss.getSheetByName("DuLieu_NhatKy");
       }
-      var nowStr = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "yyyy-MM-dd HH:mm:ss");
       sheet1.appendRow([
-        data.timestamp || nowStr,
-        data.tds || 0,
-        data.soil_moisture || 0,
-        data.float_low ? "ĐẦY NƯỚC" : "CẠN NƯỚC (ALARM)",
+        data.timestamp ? Utilities.formatDate(new Date(data.timestamp), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss") : nowStr,
+        Number(data.tds || 0),
+        Number(data.soil_moisture || 0),
+        data.float_low ? "BÌNH THƯỜNG" : "CẠN NƯỚC (ALARM)",
         data.float_high ? "TRÀN BỂ" : "BÌNH THƯỜNG",
         data.pump1 ? "BẬT" : "TẮT",
         data.pump2 ? "BẬT" : "TẮT",
         data.buzzer ? "BẬT" : "TẮT",
         data.note || "Tự động ghi nhận"
       ]);
-      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Đã ghi dữ liệu" })).setMimeType(ContentService.MimeType.JSON);
     }
 
-    // Xử lý cập nhật cài đặt
-    if (data.action === "update_settings" && data.settings) {
+    // 2. Cập nhật bảng cài đặt vào Tab 2: CaiDat_HeThong
+    if (data.action === "update_settings" || (data.action === "sync_all" && data.settings)) {
       var sheet2 = ss.getSheetByName("CaiDat_HeThong");
-      if (sheet2) {
-        // Cập nhật giá trị vào các ô tương ứng
+      if (!sheet2) {
+        khoiTaoHaiTabEcoFarm();
+        sheet2 = ss.getSheetByName("CaiDat_HeThong");
       }
-      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Đã cập nhật cài đặt" })).setMimeType(ContentService.MimeType.JSON);
+      var settingsMap = data.settings || {};
+      var values = sheet2.getDataRange().getValues();
+
+      for (var r = 1; r < values.length; r++) {
+        var key = values[r][0];
+        if (key && settingsMap[key] !== undefined) {
+          sheet2.getRange(r + 1, 2).setValue(settingsMap[key]);
+          sheet2.getRange(r + 1, 5).setValue(nowStr);
+        }
+      }
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({
+      success: true,
+      message: "Đã cập nhật dữ liệu thành công lên 2 Tab!",
+      timestamp: nowStr
+    })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(JSON.stringify({
+      success: false,
+      error: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
   }
 }
 
+// Cho phép đọc dữ liệu cài đặt từ xa
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sheet2 = ss.getSheetByName("CaiDat_HeThong");
@@ -2091,6 +2324,39 @@ function doGet(e) {
 
   res.json({ success: true, script: scriptCode });
 });
+
+// Periodic Background Auto-Sync Loop to Google Sheets Webhook
+setInterval(async () => {
+  const webhook = systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com') ? systemSettings.googleSheetsUrl : null);
+  if (!webhook) return;
+
+  try {
+    const syncTimestamp = new Date().toISOString();
+    await fetch(webhook, {
+      method: 'POST',
+      redirect: 'follow',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'log_telemetry',
+        timestamp: syncTimestamp,
+        tds: latestSensorData.tds,
+        soil_moisture: latestSensorData.soil_moisture,
+        float_low: latestSensorData.float_low,
+        float_high: latestSensorData.float_high,
+        pump1: latestSensorData.pump1,
+        pump2: latestSensorData.pump2,
+        buzzer: latestSensorData.buzzer,
+        note: 'Đồng bộ tự động từ ESP32',
+      }),
+    });
+    systemSettings.lastSheetsSyncTime = syncTimestamp;
+    systemSettings.lastSheetsSyncStatus = 'SUCCESS';
+    systemSettings.lastSheetsSyncMessage = 'Tự động đồng bộ thành công lúc ' + new Date().toLocaleTimeString('vi-VN');
+  } catch (err: any) {
+    systemSettings.lastSheetsSyncStatus = 'ERROR';
+    systemSettings.lastSheetsSyncMessage = 'Lỗi tự động đồng bộ: ' + (err.message || 'Mất kết nối');
+  }
+}, Math.max(30, systemSettings.espSheetsSyncIntervalSeconds || 60) * 1000);
 
 // AI Analyze Endpoint (Gemini + fallback)
 app.post('/api/ai/analyze', async (req, res) => {

@@ -514,8 +514,8 @@ export default function App() {
             {activeTab === 'sheets' && (
               <GoogleSheetsView
                 sheetsData={sheetsData}
-                onConnect={async (url) => {
-                  const data = await fetchGoogleSheets(url);
+                onConnect={async (url, webhookUrl) => {
+                  const data = await fetchGoogleSheets(url, webhookUrl);
                   setSheetsData(data);
                 }}
                 isLoading={isRefreshing}

@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import type { Device, ProvisioningResult, Template } from '../types.ts';
 import { DEFAULT_TEMPLATES } from '../lib/v4ConfigDefaults.ts';
+import { Esp32FirmwareStudioModal } from './Esp32FirmwareStudioModal';
 
 interface DevicesProvisioningViewProps {
   devices: Device[];
@@ -70,7 +71,27 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
     keyVersion: number;
   } | null>(null);
 
-  // Firmware & Vision code export modal state
+  // Firmware Studio modal state
+  const [isEspStudioOpen, setIsEspStudioOpen] = useState(false);
+  const [espStudioInitialTab, setEspStudioInitialTab] = useState<'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide'>('editor');
+  const [selectedEspStudioDevice, setSelectedEspStudioDevice] = useState<string>(
+    devices[0]?.id || 'ESP32S3_ECO_01'
+  );
+
+  const handleOpenEspStudio = (
+    deviceId?: string,
+    tab: 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide' = 'editor'
+  ) => {
+    if (deviceId) {
+      setSelectedEspStudioDevice(deviceId);
+    } else if (devices.length > 0) {
+      setSelectedEspStudioDevice(devices[0].id);
+    }
+    setEspStudioInitialTab(tab);
+    setIsEspStudioOpen(true);
+  };
+
+  // Legacy Firmware & Vision code export modal state
   const [isFirmwareModalOpen, setIsFirmwareModalOpen] = useState(false);
   const [firmwareTab, setFirmwareTab] = useState<'esp32' | 'vision' | 'pinout'>('esp32');
   const [firmwareCode, setFirmwareCode] = useState<string>('');
@@ -220,22 +241,58 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
 
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              id="btn_open_code_guide_header"
+              onClick={() => handleOpenEspStudio(undefined, 'code_guide')}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
+            >
+              <BookOpen className="w-4 h-4" />
+              <span>📖 Hướng Dẫn Sửa Lỗi & Chỗ Chỉnh Code</span>
+            </button>
+
+            <button
+              id="btn_open_firmware_studio_header"
+              onClick={() => handleOpenEspStudio()}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
+            >
+              <Cpu className="w-4 h-4 text-emerald-100" />
+              <span>⚡ C++ Firmware Studio (ESP32)</span>
+            </button>
+
+            <button
+              id="btn_open_legacy_firmware_modal"
               onClick={() => handleOpenFirmwareModal()}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
             >
               <Code className="w-4 h-4 text-emerald-400" />
-              <span>📥 Mã Nạp ESP32 & AI</span>
+              <span>📥 Mã Nạp Cũ & AI Vision</span>
             </button>
 
             <button
               onClick={handleStartWizard}
-              className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
+              className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
             >
               <Plus className="w-4 h-4" />
               <span>+ Thêm ESP32 Mới</span>
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Troubleshooting & Guide Alert Banner */}
+      <div className="bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/80 rounded-xl p-3 text-xs text-amber-900 dark:text-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+        <div className="flex items-start sm:items-center gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5 sm:mt-0" />
+          <span className="leading-relaxed">
+            <strong>Gặp lỗi ESP32 không kết nối được hoặc App không nhận dữ liệu?</strong> Xem ngay 6 vị trí then chốt trong mã C++: thay <code className="bg-amber-100 dark:bg-amber-900 px-1 py-0.5 rounded font-mono">localhost</code> thành IP LAN máy tính, kết nối WiFi 2.4GHz và kiểm tra mức kích rơ-le (Active LOW).
+          </span>
+        </div>
+        <button
+          onClick={() => handleOpenEspStudio(undefined, 'code_guide')}
+          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs shrink-0 self-start sm:self-auto cursor-pointer flex items-center gap-1 shadow-xs transition-colors"
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          <span>Xem chi tiết 6 vị trí chỉnh →</span>
+        </button>
       </div>
 
       {/* Devices List */}
@@ -283,12 +340,22 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
 
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
-                    onClick={() => handleOpenFirmwareModal(device.id)}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer min-h-[36px]"
-                    title="Xem mã nguồn firmware nạp sẵn cho thiết bị này"
+                    id={`btn_code_c_${device.id}`}
+                    onClick={() => handleOpenEspStudio(device.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 transition-colors cursor-pointer min-h-[36px] shadow-xs"
+                    title="Mở mã C++ tối ưu nạp cho ESP32 này (Key đã đưa vào, nạp trực tiếp, tối ưu năng lượng/mạng)"
                   >
-                    <Code className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Mã nạp</span>
+                    <Cpu className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Mã C++ ESP32</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleOpenFirmwareModal(device.id)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors cursor-pointer min-h-[36px]"
+                    title="Mã nạp cũ & AI Python"
+                  >
+                    <Code className="w-3.5 h-3.5 text-slate-500" />
+                    <span>AI Vision</span>
                   </button>
 
                   <button
@@ -919,6 +986,18 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
           </div>
         </div>
       )}
+
+      {/* ESP32 Firmware Studio & Flashing Modal */}
+      <Esp32FirmwareStudioModal
+        isOpen={isEspStudioOpen}
+        onClose={() => setIsEspStudioOpen(false)}
+        devices={devices}
+        initialDeviceId={selectedEspStudioDevice}
+        initialTab={espStudioInitialTab}
+        onRotateKey={async (devId) => {
+          await onRotateKey(devId);
+        }}
+      />
     </div>
   );
 };

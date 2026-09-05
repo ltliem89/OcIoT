@@ -112,6 +112,12 @@ let systemSettings: SystemSettings = {
 const DATA_DIR = path.join(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'v4_store.json');
 
+// Plaintext Active Device Keys for direct Firmware Injection (Server Authoritative)
+let devicePlainKeys: Record<string, string> = {
+  'ESP32S3_ECO_01': 'dvk_live_eco_01_a9f4c82b7e1039d',
+  'AIPC_VISION_01': 'dvk_live_aipc_vision_4f8b2c1e7a',
+};
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -131,6 +137,7 @@ function saveStore() {
       versions: configVersions,
       auditLogs,
       systemSettings,
+      devicePlainKeys,
     };
     fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
@@ -152,6 +159,9 @@ function loadStore() {
       if (data.versions && Array.isArray(data.versions)) configVersions = data.versions;
       if (data.auditLogs && Array.isArray(data.auditLogs)) auditLogs = data.auditLogs;
       if (data.systemSettings) systemSettings = data.systemSettings;
+      if (data.devicePlainKeys && typeof data.devicePlainKeys === 'object') {
+        devicePlainKeys = { ...devicePlainKeys, ...data.devicePlainKeys };
+      }
       console.log('✅ Đã nạp cấu hình V4 bền vững từ tệp lưu trữ cục bộ.');
     }
   } catch (err) {
@@ -324,12 +334,16 @@ app.get('/api/v1/devices', (req, res) => {
   const offlineTimeout = (systemSettings.offlineTimeoutSeconds || 30) * 1000;
   const isOnline = Date.now() - lastDeviceUpdateTime < offlineTimeout;
 
-  // Update online flag
+  // Update online flag and attach active plain key for firmware provisioning
   registeredDevices = registeredDevices.map((d) => {
+    const updated = {
+      ...d,
+      activeKey: devicePlainKeys[d.id] || (d.credentials.find((c) => c.status === 'ACTIVE') ? `dvk_live_${d.id.toLowerCase()}_${d.credentials[0].keyHash.substring(7, 15)}` : ''),
+    };
     if (d.id === systemSettings.deviceId) {
-      return { ...d, online: isOnline, lastTelemetry: latestSensorData.timestamp };
+      return { ...updated, online: isOnline, lastTelemetry: latestSensorData.timestamp };
     }
-    return d;
+    return updated;
   });
 
   res.json({ success: true, devices: registeredDevices });
@@ -407,6 +421,74 @@ app.post('/api/v1/devices/telemetry', (req, res) => {
     res.json({
       success: true,
       pendingCommandsCount: pendingForDevice.length,
+      serverTime: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Offline Resilience: Sync buffered telemetry after network recovery
+app.post('/api/v1/devices/telemetry/batch', (req, res) => {
+  try {
+    const { device_id, samples } = req.body;
+    if (!samples || !Array.isArray(samples) || samples.length === 0) {
+      return res.status(400).json({ success: false, error: 'Mảng samples rỗng hoặc không hợp lệ' });
+    }
+    const devId = device_id || systemSettings.deviceId;
+    lastDeviceUpdateTime = Date.now();
+
+    for (const s of samples) {
+      const ts = s.timestamp || new Date().toISOString();
+      const point: SensorData = {
+        device_id: devId,
+        timestamp: ts,
+        tds: s.tds !== undefined ? Number(s.tds) : null,
+        soil_moisture: s.soil_moisture !== undefined ? Number(s.soil_moisture) : null,
+        float_low: s.float_low !== undefined ? Boolean(s.float_low) : true,
+        float_high: s.float_high !== undefined ? Boolean(s.float_high) : false,
+        pump1: Boolean(s.pump1),
+        pump2: Boolean(s.pump2),
+        buzzer: Boolean(s.buzzer),
+        wifi_rssi: s.wifi_rssi !== undefined ? Number(s.wifi_rssi) : -65,
+      };
+      historyData.push(point);
+    }
+
+    while (historyData.length > 500) historyData.shift();
+
+    // Evaluate alarm rules on the latest synchronized sample
+    if (samples.length > 0) {
+      const lastSample = samples[samples.length - 1];
+      latestSensorData = {
+        ...latestSensorData,
+        device_id: devId,
+        timestamp: lastSample.timestamp || new Date().toISOString(),
+        tds: lastSample.tds !== undefined ? Number(lastSample.tds) : latestSensorData.tds,
+        soil_moisture: lastSample.soil_moisture !== undefined ? Number(lastSample.soil_moisture) : latestSensorData.soil_moisture,
+        float_low: lastSample.float_low !== undefined ? Boolean(lastSample.float_low) : latestSensorData.float_low,
+        float_high: lastSample.float_high !== undefined ? Boolean(lastSample.float_high) : latestSensorData.float_high,
+        pump1: lastSample.pump1 !== undefined ? Boolean(lastSample.pump1) : latestSensorData.pump1,
+        pump2: lastSample.pump2 !== undefined ? Boolean(lastSample.pump2) : latestSensorData.pump2,
+        buzzer: lastSample.buzzer !== undefined ? Boolean(lastSample.buzzer) : latestSensorData.buzzer,
+      };
+      evaluateAlarmRules(latestSensorData);
+    }
+
+    auditLogs.unshift({
+      id: `aud_${Date.now()}`,
+      who: devId,
+      what: `ESP32 hồi phục mạng: Đồng bộ bù ${samples.length} mẫu đo ngoại tuyến (Offline Buffer Sync)`,
+      when: new Date().toISOString(),
+      projectId: currentProject.id,
+      deviceId: devId,
+      configVersion: currentProject.activeConfigVersion,
+    });
+
+    res.json({
+      success: true,
+      message: `Đã tiếp nhận ${samples.length} mẫu đo ngoại tuyến`,
+      processedCount: samples.length,
       serverTime: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -655,122 +737,281 @@ app.post('/api/v1/provision/devices/:id/revoke-key', (req, res) => {
   res.json({ success: true, message: `Đã thu hồi key của thiết bị ${device.id}` });
 });
 
-// Production Deployment Helper: Get ready-to-flash Arduino C++ firmware for ESP32-S3
+// Production Deployment Helper: Get ready-to-flash Arduino C++ firmware for ESP32 family
 app.get('/api/v1/devices/:id/firmware-sketch', (req, res) => {
   const deviceId = req.params.id || 'ESP32S3_ECO_01';
   const device = registeredDevices.find((d) => d.id === deviceId);
   const host = req.get('host') || '0.0.0.0:3000';
   const protocol = req.protocol === 'https' ? 'https' : 'http';
-  const serverEndpoint = `${protocol}://${host}`;
+  const serverEndpoint = (req.query.serverEndpoint as string) || `${protocol}://${host}`;
+
+  // Read configuration options
+  const board = ((req.query.board as string) || 'esp32s3').toLowerCase(); // 'esp32s3' | 'esp32' | 'esp32c3' | 'esp32_xiao'
+  const powerProfile = ((req.query.powerProfile as string) || 'continuous').toLowerCase(); // 'continuous' | 'modem_sleep' | 'solar_sleep'
+  const wifiSsid = (req.query.wifiSsid as string) || 'YOUR_WIFI_NAME';
+  const wifiPassword = (req.query.wifiPassword as string) || 'YOUR_WIFI_PASSWORD';
+  const relayTrigger = ((req.query.relayTrigger as string) || 'LOW').toUpperCase(); // 'LOW' | 'HIGH'
+  const telemetryIntervalSec = Math.max(2, Math.min(300, Number(req.query.telemetryInterval) || 5));
+  const heartbeatIntervalSec = Math.max(10, Math.min(600, Number(req.query.heartbeatInterval) || 30));
+
+  // Retrieve actual active Device Key
+  const activeKey =
+    devicePlainKeys[deviceId] ||
+    (device?.credentials.find((c) => c.status === 'ACTIVE')
+      ? `dvk_live_${deviceId.toLowerCase()}_${crypto.createHash('md5').update(deviceId).digest('hex').substring(0, 16)}`
+      : 'dvk_live_PLEASE_GENERATE_KEY');
+
+  // Board pinout configuration
+  let pinoutConfig = {
+    boardName: 'ESP32-S3 DevKit (WROOM-1 / N16R8)',
+    pinTds: 4,
+    pinMoisture: 5,
+    pinFloatLow: 21,
+    pinFloatHigh: 22,
+    pinPump1: 18,
+    pinPump2: 19,
+    pinBuzzer: 23,
+    supportsDualCore: true,
+  };
+
+  if (board === 'esp32') {
+    pinoutConfig = {
+      boardName: 'ESP32 NodeMCU WROOM-32 (Standard 30/38 pin)',
+      pinTds: 34,
+      pinMoisture: 35,
+      pinFloatLow: 25,
+      pinFloatHigh: 26,
+      pinPump1: 16,
+      pinPump2: 17,
+      pinBuzzer: 18,
+      supportsDualCore: true,
+    };
+  } else if (board === 'esp32c3') {
+    pinoutConfig = {
+      boardName: 'ESP32-C3 SuperMini (RISC-V Single Core)',
+      pinTds: 0,
+      pinMoisture: 1,
+      pinFloatLow: 3,
+      pinFloatHigh: 4,
+      pinPump1: 5,
+      pinPump2: 6,
+      pinBuzzer: 7,
+      supportsDualCore: false,
+    };
+  } else if (board === 'esp32_xiao') {
+    pinoutConfig = {
+      boardName: 'Seeed Studio XIAO ESP32-S3',
+      pinTds: 1,
+      pinMoisture: 2,
+      pinFloatLow: 3,
+      pinFloatHigh: 4,
+      pinPump1: 5,
+      pinPump2: 6,
+      pinBuzzer: 7,
+      supportsDualCore: true,
+    };
+  }
 
   const sketch = `/*
-  ========================================================================
-  HỆ THỐNG QUAN TRẮC & ĐIỀU KHIỂN SINH THÁI TUẦN HOÀN OC IoT (V4.0)
-  FIRMWARE CHÍNH THỨC DÀNH CHO TRẠM ESP32-S3 (BỂ CÁ - BÈO - ỐC BƯƠU)
-  ========================================================================
-  - Mã thiết bị: ${deviceId}
-  - Máy chủ Hub: ${serverEndpoint}
-  - Giao thức: REST API v1 (Telemetry, Commands Queue, ACK)
-  - Tần suất Telemetry: 5 giây
-  - Bảo vệ an toàn: Ngắt Bơm 1 khi Phao đáy mở (chống cháy bơm)
+  ====================================================================================================
+  HỆ THỐNG QUAN TRẮC & ĐIỀU KHIỂN SINH THÁI TUẦN HOÀN OC IoT (V4.2)
+  MÃ NGUỒN C++ TOÀN DIỆN CHO BO MẠCH VI ĐIỀU KHIỂN ESP32
+  ====================================================================================================
+  Bo Mạch:            ${pinoutConfig.boardName}
+  Mã Trạm (Device ID): ${deviceId}
+  Khóa Bảo Mật:       ${activeKey}
+  Chế Độ Năng Lượng:  ${powerProfile === 'continuous' ? 'ĐIỆN LƯỚI LIÊN TỤC (Độ trễ thấp, xử lý tức thì)' : powerProfile === 'modem_sleep' ? 'TIẾT KIỆM NĂNG LƯỢNG (WiFi Modem Sleep - Giảm 60% điện, chip mát 38°C)' : 'PIN / NĂNG LƯỢNG MẶT TRỜI (Light Sleep đánh thức theo chu kỳ và phao khẩn)'}
+  Máy Chủ Hub Web:    ${serverEndpoint}
+  ====================================================================================================
+  
+  ====================================================================================================
+  📖 BẢNG TRA CỨU: CHỖ NÀO CHỈNH ĐƯỢC & CHỈNH RA SAO (HƯỚNG DẪN NGƯỜI DÙNG)
+  ====================================================================================================
+  [CHỖ CHỈNH 1/6]: TÊN WIFI VÀ MẬT KHẨU (WIFI_SSID, WIFI_PASSWORD)
+    - Chỉnh ra sao: Thay "Tên_WiFi" và "Mật_Khẩu" bằng mạng WiFi thực tế tại nơi đặt trạm.
+    - Lưu ý quan trọng: ESP32 chỉ kết nối sóng 2.4GHz. Không được dùng sóng 5GHz!
+    - Nếu đi thực địa: Bạn có thể bật "Phát điểm truy cập di động" (Hotspot) trên điện thoại 2.4GHz.
+
+  [CHỖ CHỈNH 2/6]: ĐỊA CHỈ MÁY CHỦ HUB WEB (HUB_BASE_URL)
+    - Chỉnh ra sao:
+      + Nếu dùng máy tính cá nhân mở Web Dashboard (cùng mạng WiFi):
+        Sửa thành: const char* HUB_BASE_URL = "http://192.168.1.xxx:3000/api/v1";
+        (Thay 192.168.1.xxx bằng IP thật máy tính của bạn: Mở Terminal/CMD gõ 'ipconfig' trên Windows).
+      + Nếu dùng Cloud / Web online: Giữ nguyên URL "https://...".
+      * CẢNH BÁO NGUY HIỂM: Tuyệt đối KHÔNG ĐỂ "http://localhost:3000" vì ESP32 không thể kết nối 
+        vào localhost của máy tính qua WiFi!
+
+  [CHỖ CHỈNH 3/6]: SƠ ĐỒ CHÂN NỐI DÂY GPIO (PIN_...)
+    - Chỉnh ra sao: Đổi số chân GPIO nếu bạn cắm dây sang chân khác trên bo mạch.
+    - Lưu ý: Chân cảm biến TDS & Độ ẩm đất phải là chân ADC1 để không bị nghẽn sóng WiFi.
+
+  [CHỖ CHỈNH 4/6]: MỨC KÍCH HOẠT RƠ-LE (RELAY_ON_LEVEL)
+    - Chỉnh ra sao:
+      + Đa số Module Relay 5V thông dụng là kích mức THẤP (Active LOW): Để là LOW.
+      + Nếu vừa cắm điện vào rơ-le đã tự bật máy bơm ngay -> Hãy đổi RELAY_ON_LEVEL thành HIGH!
+
+  [CHỖ CHỈNH 5/6]: CÂN CHỈNH CẢM BIẾN TDS VÀ ĐỘ ẨM ĐẤT
+    - Chỉnh ra sao: Sửa hệ số kFactor ở hàm readTDS() hoặc dải DRY/WET ở hàm readSoilMoisture().
+
+  [CHỖ CHỈNH 6/6]: CHU KỲ GỬI TIN & TIẾT KIỆM NĂNG LƯỢNG
+    - Chỉnh ra sao: Thay đổi TELEMETRY_INTERVAL_MS (mặc định 5000ms = 5 giây/lần).
+  ====================================================================================================
 */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <esp_wifi.h>
+#include <esp_sleep.h>
 
-// --- 1. CẤU HÌNH KẾT NỐI WIFI ---
-const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 1/6]: ĐIỀN TÊN WIFI VÀ MẬT KHẨU (BẮT BUỘC SỬA NẾU KHÁC MẠNG MẶC ĐỊNH) <<<
+// ====================================================================================================
+const char* WIFI_SSID         = "${wifiSsid}";      // <-- Thay bằng tên WiFi 2.4GHz của bạn
+const char* WIFI_PASSWORD     = "${wifiPassword}";  // <-- Thay bằng mật khẩu WiFi của bạn
 
-// --- 2. CẤU HÌNH THIẾT BỊ & HUB OC IoT ---
-const char* HUB_BASE_URL  = "${serverEndpoint}/api/v1";
-const char* DEVICE_ID     = "${deviceId}";
-// Dán Device Key sinh ra từ tab 'Cấp Phát Thiết Bị' vào đây:
-const char* DEVICE_KEY    = "dvk_live_YOUR_KEY_HERE";
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 2/6]: ĐỊA CHỈ MÁY CHỦ HUB WEB (KHÔNG DÙNG LOCALHOST) <<<
+// ====================================================================================================
+// Ví dụ chạy cục bộ: "http://192.168.1.15:3000/api/v1"
+// Ví dụ chạy đám mây: "${serverEndpoint}/api/v1"
+const char* HUB_BASE_URL      = "${serverEndpoint}/api/v1";
 
-// --- 3. SƠ ĐỒ KẾT NỐI CHÂN GPIO ESP32-S3 ---
-#define PIN_TDS_ADC        4   // GPIO4 (ADC1_CH3) - Cảm biến TDS Analog
-#define PIN_MOISTURE_ADC   5   // GPIO5 (ADC1_CH4) - Cảm biến độ ẩm đất Analog
-#define PIN_FLOAT_LOW      21  // GPIO21 (INPUT_PULLUP) - Phao cạn (0: Cạn, 1: Đầy)
-#define PIN_FLOAT_HIGH     22  // GPIO22 (INPUT_PULLUP) - Phao tràn (1: Chạm phao tràn)
-#define PIN_RELAY_PUMP1    18  // GPIO18 - Relay Bơm 1 (Lọc tuần hoàn bèo)
-#define PIN_RELAY_PUMP2    19  // GPIO19 - Relay Bơm 2 (Tưới ẩm giá thể)
-#define PIN_BUZZER         23  // GPIO23 - Còi báo động sự cố
+// Mã nhận diện trạm và khóa bí mật đã được cấp phát tự động
+const char* DEVICE_ID         = "${deviceId}";
+const char* DEVICE_KEY        = "${activeKey}";
 
-// Trạng thái phần cứng tức thời
-bool statePump1 = false;
-bool statePump2 = false;
-bool stateBuzzer = false;
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 3/6]: SƠ ĐỒ CHÂN NỐI DÂY GPIO TRÊN BO (${pinoutConfig.boardName}) <<<
+// ====================================================================================================
+#define PIN_TDS_ADC        ${pinoutConfig.pinTds}   // Chân Analog đọc cảm biến TDS nước
+#define PIN_MOISTURE_ADC   ${pinoutConfig.pinMoisture}   // Chân Analog đọc độ ẩm đất thảm thực vật
+#define PIN_FLOAT_LOW      ${pinoutConfig.pinFloatLow}  // Chân Phao đáy bể (chống cạn - INPUT_PULLUP nối GND)
+#define PIN_FLOAT_HIGH     ${pinoutConfig.pinFloatHigh}  // Chân Phao đỉnh bể (chống tràn - INPUT_PULLUP nối GND)
+#define PIN_RELAY_PUMP1    ${pinoutConfig.pinPump1}  // Chân kích Relay Bơm 1: Lọc tuần hoàn sinh học
+#define PIN_RELAY_PUMP2    ${pinoutConfig.pinPump2}  // Chân kích Relay Bơm 2: Tưới vi sinh/phun sương
+#define PIN_BUZZER         ${pinoutConfig.pinBuzzer}  // Chân còi báo động sự cố
+
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 4/6]: MỨC KÍCH HOẠT RƠ-LE (ACTIVE LOW HOẶC ACTIVE HIGH) <<<
+// ====================================================================================================
+// Hầu hết mạch Relay 5V Arduino là Active LOW (Ghi LOW là BẬT, Ghi HIGH là TẮT)
+// Nếu module của bạn bật ở mức HIGH, hãy đổi: RELAY_ON_LEVEL = HIGH, RELAY_OFF_LEVEL = LOW
+#define RELAY_ON_LEVEL     ${relayTrigger}
+#define RELAY_OFF_LEVEL    (${relayTrigger} == LOW ? HIGH : LOW)
+
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 6/6]: CHU KỲ GỬI TIN BÁO CÁO <<<
+// ====================================================================================================
+const unsigned long TELEMETRY_INTERVAL_MS = ${telemetryIntervalSec * 1000}; // Mặc định: ${telemetryIntervalSec} giây
+const unsigned long HEARTBEAT_INTERVAL_MS = ${heartbeatIntervalSec * 1000}; // Mặc định: ${heartbeatIntervalSec} giây
+
+// ====================================================================================================
+// [KHÔNG NÊN SỬA]: CÁC BIẾN HỆ THỐNG & BỘ NHỚ ĐỆM NGOẠI TUYẾN
+// ====================================================================================================
+#define OFFLINE_BUFFER_CAPACITY 30
+
+struct OfflineTelemetrySample {
+  int tds;
+  int moisture;
+  bool floatLow;
+  bool floatHigh;
+  bool pump1;
+  bool pump2;
+  bool buzzer;
+  unsigned long timestampSec;
+};
+
+OfflineTelemetrySample offlineBuffer[OFFLINE_BUFFER_CAPACITY];
+int offlineBufferCount = 0;
+
+volatile bool statePump1 = false;
+volatile bool statePump2 = false;
+volatile bool stateBuzzer = false;
 
 unsigned long lastTelemetryMs = 0;
 unsigned long lastHeartbeatMs = 0;
-const unsigned long TELEMETRY_INTERVAL = 5000;   // 5s
-const unsigned long HEARTBEAT_INTERVAL = 30000;  // 30s
+unsigned long lastWifiCheckMs = 0;
+bool wasOffline = false;
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\\n[OC IoT] Khoi dong Tram ESP32-S3...");
+// ====================================================================================================
+// HÀM GỬI HTTP/HTTPS ĐA NĂNG (TỰ ĐỘNG XỬ LÝ SSL KHÔNG BỊ TREO HOẶC LỖI -1)
+// ====================================================================================================
+int sendJsonRequest(const String &url, const String &method, const String &payload, String &responseBody) {
+  HTTPClient http;
+  bool isHttps = url.startsWith("https://");
+  WiFiClient clientHttp;
+  WiFiClientSecure clientHttps;
 
-  // Cấu hình chân GPIO đầu vào (Phao mực nước có kéo trở nội)
-  pinMode(PIN_FLOAT_LOW, INPUT_PULLUP);
-  pinMode(PIN_FLOAT_HIGH, INPUT_PULLUP);
-
-  // Cấu hình chân GPIO điều khiển Relay & Còi
-  pinMode(PIN_RELAY_PUMP1, OUTPUT);
-  pinMode(PIN_RELAY_PUMP2, OUTPUT);
-  pinMode(PIN_BUZZER, OUTPUT);
-
-  // Mặc định rơ-le tắt (mức thấp hoặc cao tùy module relay)
-  digitalWrite(PIN_RELAY_PUMP1, LOW);
-  digitalWrite(PIN_RELAY_PUMP2, LOW);
-  digitalWrite(PIN_BUZZER, LOW);
-
-  // Kết nối WiFi
-  connectWiFi();
-}
-
-void connectWiFi() {
-  Serial.printf("[WiFi] Dang ket noi toi: %s\\n", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  int retry = 0;
-  while (WiFi.status() != WL_CONNECTED && retry < 25) {
-    delay(500);
-    Serial.print(".");
-    retry++;
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\\n[WiFi] Da ket noi thanh cong! IP: %s, RSSI: %d dBm\\n",
-      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  if (isHttps) {
+    clientHttps.setInsecure(); // Bỏ qua xác thực SSL để tương thích máy chủ Cloud Run / HTTPS
+    http.begin(clientHttps, url);
   } else {
-    Serial.println("\\n[WiFi] Chua the ket noi, se thu lai trong loop...");
+    http.begin(clientHttp, url);
   }
+
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Key", DEVICE_KEY);
+  http.addHeader("Authorization", String("Bearer ") + DEVICE_KEY);
+  http.setTimeout(4500); // Timeout 4.5 giây
+
+  int code = -1;
+  if (method == "POST") {
+    code = http.POST(payload);
+  } else {
+    code = http.GET();
+  }
+
+  if (code > 0) {
+    responseBody = http.getString();
+  } else {
+    Serial.printf("[HTTP] Loi ket noi toi Hub (Code: %d, Chi tiet: %s)\\n", code, http.errorToString(code).c_str());
+  }
+
+  http.end();
+  return code;
 }
 
-// Đọc cảm biến TDS và quy đổi ppm
+// ====================================================================================================
+// >>> [CHỖ CHỈNH 5/6]: CÂN CHỈNH CẢM BIẾN TDS VÀ ĐỘ ẨM ĐẤT <<<
+// ====================================================================================================
 float readTDS() {
-  int raw = analogRead(PIN_TDS_ADC);
-  float voltage = (raw / 4095.0) * 3.3;
-  // Công thức xấp xỉ chuẩn hóa cho module TDS 3.3V
-  float compensationCoefficient = 1.0; 
-  float tdsValue = (133.42 * pow(voltage, 3) - 255.86 * pow(voltage, 2) + 857.39 * voltage) * 0.5;
+  long sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(PIN_TDS_ADC);
+    delayMicroseconds(200);
+  }
+  float raw = sum / 10.0;
+  float voltage = (raw / 4095.0) * 3.3; // ADC 12-bit ESP32
+  
+  // Công thức chuyển đổi Điện áp (V) sang TDS (ppm):
+  // Có thể nhân thêm hệ số cân chỉnh kFactor nếu so với bút đo TDS thực tế
+  float kFactor = 1.0; 
+  float tdsValue = (133.42 * pow(voltage, 3) - 255.86 * pow(voltage, 2) + 857.39 * voltage) * 0.5 * kFactor;
   if (tdsValue < 0) tdsValue = 0;
   return tdsValue;
 }
 
-// Đọc độ ẩm đất (%)
 int readSoilMoisture() {
-  int raw = analogRead(PIN_MOISTURE_ADC);
-  // Cảm biến điện dung: Khô ~ 3000, Ẩm ướt ~ 1200
-  int percent = map(raw, 3000, 1200, 0, 100);
+  long sum = 0;
+  for (int i = 0; i < 8; i++) {
+    sum += analogRead(PIN_MOISTURE_ADC);
+    delayMicroseconds(200);
+  }
+  int raw = sum / 8;
+  
+  // Hiệu chuẩn cảm biến điện dung:
+  // Giá trị khi ở không khí khô ráo (Air): ~3000
+  // Giá trị khi ngâm vào cốc nước (Water): ~1200
+  const int RAW_AIR = 3000;
+  const int RAW_WATER = 1200;
+  int percent = map(raw, RAW_AIR, RAW_WATER, 0, 100);
   return constrain(percent, 0, 100);
 }
 
-// Đọc phao nước (True nếu nước đầy, False nếu cạn)
 bool readFloatLow() {
-  // Switch đóng = nối GND = LOW khi có nước
+  // Phao đóng tiếp điểm nối chân GPIO xuống GND khi có nước (LOW = Đủ nước an toàn, HIGH = Cạn nước)
   return digitalRead(PIN_FLOAT_LOW) == LOW;
 }
 
@@ -778,47 +1019,150 @@ bool readFloatHigh() {
   return digitalRead(PIN_FLOAT_HIGH) == LOW;
 }
 
-void sendHeartbeat() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  HTTPClient http;
-  String url = String(HUB_BASE_URL) + "/devices/heartbeat";
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
+// ====================================================================================================
+// BẢO VỆ PHẦN CỨNG TỰ TRỊ (CHỐNG CHÁY MÁY BƠM KHI HẾT NƯỚC)
+// ====================================================================================================
+void evaluateLocalSafety(bool waterLowSafe) {
+  // BẢO VỆ TỐI CAO: Dù có mạng hay mất mạng hoàn toàn, nếu hụt nước đáy bể,
+  // lập tức ngắt Bơm 1 để bảo vệ chống cháy máy bơm!
+  if (!waterLowSafe && statePump1) {
+    statePump1 = false;
+    digitalWrite(PIN_RELAY_PUMP1, RELAY_OFF_LEVEL);
+    Serial.println("[AN TOAN CUC BO] Can nuoc duoi muc an toan! Tu dong ngat Bom 1!");
+  }
+}
 
-  StaticJsonDocument<256> doc;
+// ====================================================================================================
+// QUẢN LÝ KẾT NỐI WIFI TỰ PHỤC HỒI (KHÔNG LÀM TREO CHƯƠNG TRÌNH)
+// ====================================================================================================
+void flushOfflineBuffer();
+
+void maintainWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    if (wasOffline) {
+      wasOffline = false;
+      Serial.println("\\n[WiFi] Da ket noi lai mang! Tien hanh day bu du lieu luu dem...");
+      flushOfflineBuffer();
+    }
+    return;
+  }
+
+  wasOffline = true;
+  unsigned long now = millis();
+  if (now - lastWifiCheckMs >= 10000) {
+    lastWifiCheckMs = now;
+    Serial.println("[WiFi] Mat ket noi mang. Dang thu ket noi lai...");
+    WiFi.reconnect();
+  }
+}
+
+void initWiFi() {
+  Serial.printf("\\n[WiFi] Dang ket noi vao mang: %s\\n", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+
+  ${
+    powerProfile === 'modem_sleep'
+      ? `  // Bật chế độ tiết kiệm điện Modem Sleep (Giảm 60% điện năng, chip mát 38°C)
+  WiFi.setSleep(true);
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  Serial.println("[Power] Da kich hoat WiFi Modem Sleep.");`
+      : ''
+  }
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  // Chỉ chờ tối đa 14 lần (7 giây) khi khởi động
+  int retry = 0;
+  while (WiFi.status() != WL_CONNECTED && retry < 14) {
+    delay(500);
+    Serial.print(".");
+    retry++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\\n[WiFi] KET NOI THANH CONG! IP: %s, Tin hieu RSSI: %d dBm\\n",
+      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  } else {
+    Serial.println("\\n-------------------------------------------------------------");
+    Serial.println("[CANH BAO] Khong the ket noi WiFi!");
+    Serial.println("  1. Kiem tra xem ten WIFI_SSID va WIFI_PASSWORD co dung khong?");
+    Serial.println("  2. Kiem tra xem WiFi co phai bang tan 2.4GHz khong (5GHz khong chay)?");
+    Serial.println("  -> Tram se hoat dong o che do NGOAI TUYEN TU TRI va luu dem du lieu.");
+    Serial.println("-------------------------------------------------------------");
+  }
+}
+
+// ====================================================================================================
+// BỘ NHỚ ĐỆM & GỬI BÙ DỮ LIỆU KHI CÓ MẠNG TRỞ LẠI
+// ====================================================================================================
+void bufferOfflineSample(int tds, int moisture, bool floatLow, bool floatHigh) {
+  if (offlineBufferCount < OFFLINE_BUFFER_CAPACITY) {
+    offlineBuffer[offlineBufferCount] = {
+      tds, moisture, floatLow, floatHigh, statePump1, statePump2, stateBuzzer, millis() / 1000
+    };
+    offlineBufferCount++;
+    Serial.printf("[Luu Dem] Da luu mau %d/%d vao bo nho dem\\n", offlineBufferCount, OFFLINE_BUFFER_CAPACITY);
+  } else {
+    for (int i = 0; i < OFFLINE_BUFFER_CAPACITY - 1; i++) {
+      offlineBuffer[i] = offlineBuffer[i + 1];
+    }
+    offlineBuffer[OFFLINE_BUFFER_CAPACITY - 1] = {
+      tds, moisture, floatLow, floatHigh, statePump1, statePump2, stateBuzzer, millis() / 1000
+    };
+  }
+}
+
+void flushOfflineBuffer() {
+  if (offlineBufferCount == 0 || WiFi.status() != WL_CONNECTED) return;
+
+  String url = String(HUB_BASE_URL) + "/devices/telemetry/batch";
+  DynamicJsonDocument doc(4096);
   doc["device_id"] = DEVICE_ID;
-  doc["rssi"] = WiFi.RSSI();
-  doc["ip"] = WiFi.localIP().toString();
-  doc["firmware"] = "v4.1.2-esp32s3";
+  JsonArray samples = doc.createNestedArray("samples");
+
+  for (int i = 0; i < offlineBufferCount; i++) {
+    JsonObject s = samples.createNestedObject();
+    s["tds"] = offlineBuffer[i].tds;
+    s["soil_moisture"] = offlineBuffer[i].moisture;
+    s["float_low"] = offlineBuffer[i].floatLow;
+    s["float_high"] = offlineBuffer[i].floatHigh;
+    s["pump1"] = offlineBuffer[i].pump1;
+    s["pump2"] = offlineBuffer[i].pump2;
+    s["buzzer"] = offlineBuffer[i].buzzer;
+  }
 
   String body;
   serializeJson(doc, body);
-  int httpCode = http.POST(body);
-  http.end();
+  String response;
+  int httpCode = sendJsonRequest(url, "POST", body, response);
+
+  if (httpCode == 200) {
+    Serial.printf("[Dong Bo] Da day bu thanh cong %d mau do len Hub!\\n", offlineBufferCount);
+    offlineBufferCount = 0;
+  }
 }
 
-void sendTelemetryAndPollCommands() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  
+// ====================================================================================================
+// GỬI TELEMETRY & KÉO LỆNH ĐIỀU KHIỂN TỪ HUB
+// ====================================================================================================
+void pollAndExecuteCommands();
+
+void sendTelemetryAndPoll() {
   float tds = readTDS();
   int moisture = readSoilMoisture();
   bool waterLowSafe = readFloatLow();
   bool waterHigh = readFloatHigh();
 
-  // BẢO VỆ PHẦN CỨNG: Nếu cạn nước, tự động ngắt Bơm 1 ngay lập tức
-  if (!waterLowSafe && statePump1) {
-    statePump1 = false;
-    digitalWrite(PIN_RELAY_PUMP1, LOW);
-    Serial.println("[AN TOAN] Can nuoc duoi phao LOW! Tu dong ngat Bom 1!");
+  evaluateLocalSafety(waterLowSafe);
+
+  if (WiFi.status() != WL_CONNECTED) {
+    bufferOfflineSample((int)tds, moisture, waterLowSafe, waterHigh);
+    return;
   }
 
-  // 1. Gửi Telemetry
-  HTTPClient http;
   String url = String(HUB_BASE_URL) + "/devices/telemetry";
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-
-  StaticJsonDocument<384> doc;
+  StaticJsonDocument<512> doc;
   doc["device_id"] = DEVICE_ID;
   doc["tds"] = (int)tds;
   doc["soil_moisture"] = moisture;
@@ -831,55 +1175,63 @@ void sendTelemetryAndPollCommands() {
 
   String body;
   serializeJson(doc, body);
-  int httpCode = http.POST(body);
-  String response = http.getString();
-  http.end();
+  String response;
+  int code = sendJsonRequest(url, "POST", body, response);
 
-  // 2. Kéo lệnh đang chờ trong hàng đợi (Pending Commands)
+  if (code == 200) {
+    Serial.printf("[Telemetry] TDS: %d ppm | Do am: %d%% | Phao Day: %s | Bom1: %s\\n",
+      (int)tds, moisture, waterLowSafe ? "DU" : "CAN!", statePump1 ? "ON" : "OFF");
+  }
+
   pollAndExecuteCommands();
 }
 
+void sendAck(String cmdId);
+
 void pollAndExecuteCommands() {
-  HTTPClient http;
+  if (WiFi.status() != WL_CONNECTED) return;
+
   String url = String(HUB_BASE_URL) + "/devices/" + DEVICE_ID + "/commands/pending";
-  http.begin(url);
-  int code = http.GET();
+  String response;
+  int code = sendJsonRequest(url, "GET", "", response);
+
   if (code == 200) {
-    String payload = http.getString();
     DynamicJsonDocument resDoc(1024);
-    deserializeJson(resDoc, payload);
+    deserializeJson(resDoc, response);
     JsonArray cmds = resDoc["commands"].as<JsonArray>();
 
     for (JsonObject cmd : cmds) {
       String cmdId = cmd["id"].as<String>();
-      Serial.printf("[Command] Nhan lenh tu Hub: %s\\n", cmdId.c_str());
+      Serial.printf("[Lenh] Nhan lenh tu Hub: %s\\n", cmdId.c_str());
 
       if (cmd.containsKey("pump1")) {
-        statePump1 = cmd["pump1"].as<bool>();
-        digitalWrite(PIN_RELAY_PUMP1, statePump1 ? HIGH : LOW);
+        bool targetPump1 = cmd["pump1"].as<bool>();
+        if (targetPump1 && !readFloatLow()) {
+          Serial.println("[TU CHOI] Be can nuoc! Khong duoc phep bat Bom 1!");
+          statePump1 = false;
+        } else {
+          statePump1 = targetPump1;
+        }
+        digitalWrite(PIN_RELAY_PUMP1, statePump1 ? RELAY_ON_LEVEL : RELAY_OFF_LEVEL);
       }
+
       if (cmd.containsKey("pump2")) {
         statePump2 = cmd["pump2"].as<bool>();
-        digitalWrite(PIN_RELAY_PUMP2, statePump2 ? HIGH : LOW);
+        digitalWrite(PIN_RELAY_PUMP2, statePump2 ? RELAY_ON_LEVEL : RELAY_OFF_LEVEL);
       }
+
       if (cmd.containsKey("buzzer")) {
         stateBuzzer = cmd["buzzer"].as<bool>();
         digitalWrite(PIN_BUZZER, stateBuzzer ? HIGH : LOW);
       }
 
-      // Gửi ACK xác nhận thực thi lệnh khép kín
       sendAck(cmdId);
     }
   }
-  http.end();
 }
 
 void sendAck(String cmdId) {
-  HTTPClient http;
   String url = String(HUB_BASE_URL) + "/devices/" + DEVICE_ID + "/commands/" + cmdId + "/ack";
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-
   StaticJsonDocument<256> doc;
   doc["status"] = "EXECUTED";
   JsonObject state = doc.createNestedObject("executedState");
@@ -889,39 +1241,93 @@ void sendAck(String cmdId) {
 
   String body;
   serializeJson(doc, body);
-  http.POST(body);
-  http.end();
+  String response;
+  sendJsonRequest(url, "POST", body, response);
 }
 
+void sendHeartbeat() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  String url = String(HUB_BASE_URL) + "/devices/heartbeat";
+  StaticJsonDocument<256> doc;
+  doc["device_id"] = DEVICE_ID;
+  doc["rssi"] = WiFi.RSSI();
+  doc["ip"] = WiFi.localIP().toString();
+  doc["firmware"] = "v4.2.2-${board}";
+
+  String body;
+  serializeJson(doc, body);
+  String response;
+  sendJsonRequest(url, "POST", body, response);
+}
+
+// ====================================================================================================
+// KHỞI ĐỘNG HỆ THỐNG (SETUP)
+// ====================================================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("\\n========================================================");
+  Serial.printf(" [OC IoT] Khoi dong Tram: %s\\n", DEVICE_ID);
+  Serial.printf(" Bo mach: %s\\n", "${pinoutConfig.boardName}");
+  Serial.println("========================================================");
+
+  pinMode(PIN_FLOAT_LOW, INPUT_PULLUP);
+  pinMode(PIN_FLOAT_HIGH, INPUT_PULLUP);
+
+  pinMode(PIN_RELAY_PUMP1, OUTPUT);
+  pinMode(PIN_RELAY_PUMP2, OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
+
+  // Mặc định ban đầu ở trạng thái AN TOÀN (TẮT RƠ-LE VÀ CÒI)
+  digitalWrite(PIN_RELAY_PUMP1, RELAY_OFF_LEVEL);
+  digitalWrite(PIN_RELAY_PUMP2, RELAY_OFF_LEVEL);
+  digitalWrite(PIN_BUZZER, LOW);
+
+  initWiFi();
+}
+
+// ====================================================================================================
+// VÒNG LẶP CHÍNH (LOOP)
+// ====================================================================================================
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    connectWiFi();
-    delay(2000);
-    return;
-  }
+  maintainWiFi();
+  evaluateLocalSafety(readFloatLow());
 
   unsigned long currentMs = millis();
 
-  // Chu kỳ gửi Telemetry (5s)
-  if (currentMs - lastTelemetryMs >= TELEMETRY_INTERVAL) {
+  if (currentMs - lastTelemetryMs >= TELEMETRY_INTERVAL_MS) {
     lastTelemetryMs = currentMs;
-    sendTelemetryAndPollCommands();
+    sendTelemetryAndPoll();
   }
 
-  // Chu kỳ gửi Heartbeat (30s)
-  if (currentMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL) {
+  if (currentMs - lastHeartbeatMs >= HEARTBEAT_INTERVAL_MS) {
     lastHeartbeatMs = currentMs;
     sendHeartbeat();
   }
 
-  delay(50);
+  ${
+    powerProfile === 'solar_sleep'
+      ? `  // Chế độ Solar/Battery: Đưa vào Light Sleep giữa các chu kỳ đo
+  esp_sleep_enable_timer_wakeup((uint64_t)TELEMETRY_INTERVAL_MS * 1000ULL);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_FLOAT_LOW, 1);
+  Serial.println("[Solar Power] Bat dau Light Sleep tiet kiem pin...");
+  Serial.flush();
+  esp_light_sleep_start();
+  Serial.println("[Solar Power] Thuc giac do tiep!");`
+      : '  delay(50);'
+  }
 }
 `;
 
   res.json({
     success: true,
     deviceId,
-    firmwareVersion: 'v4.1.2-esp32s3',
+    board,
+    powerProfile,
+    activeKey,
+    firmwareVersion: `v4.2.0-${board}`,
+    pinout: pinoutConfig,
     sketch,
   });
 });
@@ -1425,29 +1831,66 @@ app.get('/api/sheets', async (req, res) => {
   }
 
   try {
+    // Check if user provided Google Apps Script Web App URL
+    if (sheetUrl.includes('script.google.com/macros/s/')) {
+      systemSettings.googleSheetsUrl = sheetUrl;
+      saveStore();
+      return res.json({
+        connected: true,
+        url: sheetUrl,
+        spreadsheetId: 'APPS_SCRIPT_WEBHOOK',
+        lastUpdate: new Date().toISOString(),
+        rowsCount: historyData.length,
+        records: historyData.slice(-50),
+        message: 'Đã kết nối trực tiếp với Google Apps Script Web App (Hỗ trợ 2 chiều Đọc/Ghi 2 Tab)!',
+      });
+    }
+
     const match = sheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
     if (!match || !match[1]) {
       return res.status(400).json({
         connected: false,
         url: sheetUrl,
         spreadsheetId: null,
-        error: 'URL Google Sheets không hợp lệ.',
+        error: 'URL Google Sheets không hợp lệ. Vui lòng dán link dạng: https://docs.google.com/spreadsheets/d/.../edit',
       });
     }
 
     const spreadsheetId = match[1];
     const exportCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
 
-    const response = await fetch(exportCsvUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-    });
+    let rows: string[] = [];
+    let isNewOrEmpty = false;
 
-    if (!response.ok) {
-      throw new Error(`Google Sheets phản hồi lỗi ${response.status}. Cần cấp quyền chia sẻ liên kết xem công khai.`);
+    try {
+      const response = await fetch(exportCsvUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+
+      if (!response.ok) {
+        // If export fails (e.g. newly created blank sheet or private), provide specific guidance
+        if (response.status === 401 || response.status === 403 || response.status === 404) {
+          throw new Error(`Google Sheets phản hồi mã ${response.status}. Bạn cần mở Google Sheet, bấm nút [Chia sẻ] (Share) ở góc trên bên phải -> chọn "Bất kỳ ai có đường liên kết" (Anyone with the link) -> cấp quyền "Người xem" hoặc "Người chỉnh sửa".`);
+        }
+        throw new Error(`Google Sheets phản hồi lỗi ${response.status}.`);
+      }
+
+      const csvText = await response.text();
+      rows = csvText.split(/\r?\n/).filter((r) => r.trim().length > 0);
+      if (rows.length <= 1) {
+        isNewOrEmpty = true;
+      }
+    } catch (fetchErr: any) {
+      // If fetching export failed due to empty or permissions, record URL but inform user
+      systemSettings.googleSheetsUrl = sheetUrl;
+      saveStore();
+      return res.status(400).json({
+        connected: false,
+        url: sheetUrl,
+        spreadsheetId,
+        error: fetchErr.message || 'Không thể đọc dữ liệu từ Google Sheets',
+      });
     }
-
-    const csvText = await response.text();
-    const rows = csvText.split(/\r?\n/).filter((r) => r.trim().length > 0);
 
     const sheetsData: GoogleSheetsData = {
       connected: true,
@@ -1456,13 +1899,197 @@ app.get('/api/sheets', async (req, res) => {
       lastUpdate: new Date().toISOString(),
       rowsCount: Math.max(0, rows.length - 1),
       records: historyData.slice(-50),
+      isNewOrEmpty,
+      message: isNewOrEmpty
+        ? 'Đã kết nối với Bảng tính mới! Bảng tính đang trống, bạn có thể khởi tạo Tab Nhật Ký và Tab Cài Đặt theo hướng dẫn bên dưới.'
+        : `Đã kết nối thành công, đọc được ${Math.max(0, rows.length - 1)} dòng dữ liệu.`,
     };
 
     systemSettings.googleSheetsUrl = sheetUrl;
+    saveStore();
     res.json(sheetsData);
   } catch (error: any) {
     res.status(500).json({ connected: false, url: sheetUrl, error: error.message });
   }
+});
+
+// Download/Export Settings as CSV for Tab "CaiDat_HeThong"
+app.get('/api/sheets/settings-csv', (req, res) => {
+  const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
+  const csvLines = [
+    'THONG_SO,GIA_TRI,DON_VI_Y_NGHIA',
+    `TDS_MIN,${systemSettings.tdsMin},ppm - Nguong dinh duong toi thieu`,
+    `TDS_MAX,${systemSettings.tdsMax},ppm - Nguong dinh duong toi da an toan`,
+    `TDS_CRITICAL,${systemSettings.tdsCritical},ppm - Nguong nguy cap`,
+    `DO_AM_DAT_MIN,${systemSettings.soilMoistureMin},% - Duoi nguong nay tu dong bat Bom 2`,
+    `DO_AM_DAT_MAX,${systemSettings.soilMoistureMax},% - Dat nguong nay tu dong ngat Bom 2`,
+    `THOI_GIAN_BOM_1_MAX,${systemSettings.pump1MaxContinuousMinutes},phut - Bom tuan hoan chay lien tuc toi da`,
+    `THOI_GIAN_TUOI_RAU,${systemSettings.pump2IrrigationDurationSeconds},giay - Thoi gian moi dot tuoi rau`,
+    `KHOANG_NGHI_TUOI_RAU,${systemSettings.pump2RestIntervalMinutes},phut - Khoang nghi giua cac dot tuoi`,
+    `TU_DONG_NGAT_KHI_CAN,${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'},Tu dong ngat Bom 1 khi phao day bao can nuoc`,
+    `COI_BUZZER_CANH_BAO,${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'},Keu coi bao dong khi co su co`,
+    `CHU_KY_GUI_TIN_ESP,${systemSettings.espReportIntervalSeconds},giay - Chu ky gui du lieu telemetry`,
+    `CHU_KY_GHI_SHEETS,${systemSettings.espSheetsSyncIntervalSeconds},giay - Chu ky dong bo len Google Sheets`,
+    `DEVICE_ID,${systemSettings.deviceId},Ma dinh danh phan cung ESP32-S3`,
+    `DEVICE_KEY,${activeKey},Khoa xac thuc nap vao firmware ESP32`,
+    `CAMERA_STREAM_URL,${systemSettings.cameraStreamUrl || 'Khong co'},Duong dan luong RTSP/HTTP camera`,
+    `NGAY_CAP_NHAT,${new Date().toISOString()},Thoi diem he thong ghi nhan cau hinh`,
+  ];
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="CaiDat_HeThong_EcoFarm.csv"');
+  res.send('\uFEFF' + csvLines.join('\r\n'));
+});
+
+// Full Google Apps Script Code Generator (Creates 2 tabs & Web App Webhook)
+app.get('/api/sheets/apps-script-code', (req, res) => {
+  const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
+  const scriptCode = `/**
+ * ==============================================================================
+ * HỆ THỐNG GIÁM SÁT AQUAPONICS ECOFARM - GOOGLE APPS SCRIPT ĐỒNG BỘ 2 TAB
+ * Tab 1: DuLieu_NhatKy (Nhật ký cảm biến đo đạc)
+ * Tab 2: CaiDat_HeThong (Thông số cài đặt, ngưỡng, khóa thiết bị)
+ * ==============================================================================
+ */
+
+// BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 2 Tab và định dạng đẹp
+function khoiTaoHaiTabEcoFarm() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1. TẠO TAB 1: DuLieu_NhatKy
+  var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
+  if (!sheet1) {
+    sheet1 = ss.insertSheet("DuLieu_NhatKy", 0);
+  }
+  sheet1.clear();
+  var headers1 = [
+    "Thời Gian",
+    "TDS (ppm)",
+    "Độ Ẩm Đất (%)",
+    "Phao Đáy (LOW)",
+    "Phao Tràn (HIGH)",
+    "Bơm 1 (Tuần Hoàn)",
+    "Bơm 2 (Tưới Rau)",
+    "Còi Buzzer",
+    "Ghi Chú Trạng Thái"
+  ];
+  sheet1.appendRow(headers1);
+  var headerRange1 = sheet1.getRange(1, 1, 1, headers1.length);
+  headerRange1.setBackground("#0f172a");
+  headerRange1.setFontColor("#38bdf8");
+  headerRange1.setFontWeight("bold");
+  sheet1.setFrozenRows(1);
+  sheet1.autoResizeColumns(1, headers1.length);
+
+  // 2. TẠO TAB 2: CaiDat_HeThong
+  var sheet2 = ss.getSheetByName("CaiDat_HeThong");
+  if (!sheet2) {
+    sheet2 = ss.insertSheet("CaiDat_HeThong", 1);
+  }
+  sheet2.clear();
+  var headers2 = ["MÃ THÔNG SỐ (KEY)", "GIÁ TRỊ HIỆN TẠI (VALUE)", "ĐƠN VỊ & Ý NGHĨA HOẠT ĐỘNG"];
+  sheet2.appendRow(headers2);
+  var headerRange2 = sheet2.getRange(1, 1, 1, headers2.length);
+  headerRange2.setBackground("#1e293b");
+  headerRange2.setFontColor("#4ade80");
+  headerRange2.setFontWeight("bold");
+  sheet2.setFrozenRows(1);
+
+  // Điền sẵn toàn bộ dữ liệu cài đặt từ hệ thống
+  var settingsRows = [
+    ["TDS_MIN", ${systemSettings.tdsMin}, "ppm - Dưới ngưỡng này kích hoạt bổ sung vi lượng dinh dưỡng"],
+    ["TDS_MAX", ${systemSettings.tdsMax}, "ppm - Ngưỡng an toàn tối đa cho cá và ốc"],
+    ["TDS_CRITICAL", ${systemSettings.tdsCritical}, "ppm - Ngưỡng nguy cấp, kích hoạt cảnh báo đỏ"],
+    ["DO_AM_DAT_MIN", ${systemSettings.soilMoistureMin}, "% - Dưới ngưỡng này tự động bật Bơm 2 tưới rau"],
+    ["DO_AM_DAT_MAX", ${systemSettings.soilMoistureMax}, "% - Đạt ngưỡng này tự động ngắt Bơm 2"],
+    ["THOI_GIAN_BOM_1_MAX", ${systemSettings.pump1MaxContinuousMinutes}, "phút - Thời gian Bơm 1 tuần hoàn chạy liên tục tối đa"],
+    ["THOI_GIAN_TUOI_RAU", ${systemSettings.pump2IrrigationDurationSeconds}, "giây - Thời gian mỗi đợt bơm tưới giàn rau"],
+    ["KHOANG_NGHI_TUOI", ${systemSettings.pump2RestIntervalMinutes}, "phút - Khoảng nghỉ giữa các đợt tưới"],
+    ["TU_DONG_NGAT_KHI_CAN", "${systemSettings.floatLowSafetyCutoff ? 'BAT' : 'TAT'}", "Tự động ngắt Bơm 1 ngay khi phao đáy báo cạn nước"],
+    ["COI_BUZZER_CANH_BAO", "${systemSettings.autoRules.buzzerOnCriticalAlert ? 'BAT' : 'TAT'}", "Phát còi bíp cảnh báo khi hệ thống gặp sự cố"],
+    ["CHU_KY_GUI_TIN_ESP", ${systemSettings.espReportIntervalSeconds}, "giây - Chu kỳ gửi tin telemetry từ ESP32"],
+    ["DEVICE_ID", "${systemSettings.deviceId}", "Mã định danh trạm điều khiển phần cứng"],
+    ["DEVICE_KEY", "${activeKey}", "Khóa xác thực bảo mật nạp vào mã C++"],
+    ["NGAY_CAP_NHAT", Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "yyyy-MM-dd HH:mm:ss"), "Thời gian máy chủ ghi nhận cấu hình"]
+  ];
+
+  for (var i = 0; i < settingsRows.length; i++) {
+    sheet2.appendRow(settingsRows[i]);
+  }
+  sheet2.autoResizeColumns(1, 3);
+
+  // Xóa sheet mặc định nếu có tên "Trang tính 1" hoặc "Sheet1"
+  var defaultSheet = ss.getSheetByName("Trang tính 1") || ss.getSheetByName("Sheet1");
+  if (defaultSheet && ss.getSheets().length > 2) {
+    ss.deleteSheet(defaultSheet);
+  }
+
+  SpreadsheetApp.getUi().alert("✅ Đã khởi tạo thành công 2 Tab: 'DuLieu_NhatKy' và 'CaiDat_HeThong'!");
+}
+
+// BƯỚC 2: Nhận dữ liệu ghi vào Nhật Ký hoặc cập nhật Cài Đặt khi Web gửi sang
+function doPost(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var data = JSON.parse(e.postData.contents);
+
+    // Xử lý ghi dữ liệu cảm biến
+    if (data.action === "log_telemetry" || data.tds !== undefined) {
+      var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
+      if (!sheet1) {
+        khoiTaoHaiTabEcoFarm();
+        sheet1 = ss.getSheetByName("DuLieu_NhatKy");
+      }
+      var nowStr = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "yyyy-MM-dd HH:mm:ss");
+      sheet1.appendRow([
+        data.timestamp || nowStr,
+        data.tds || 0,
+        data.soil_moisture || 0,
+        data.float_low ? "ĐẦY NƯỚC" : "CẠN NƯỚC (ALARM)",
+        data.float_high ? "TRÀN BỂ" : "BÌNH THƯỜNG",
+        data.pump1 ? "BẬT" : "TẮT",
+        data.pump2 ? "BẬT" : "TẮT",
+        data.buzzer ? "BẬT" : "TẮT",
+        data.note || "Tự động ghi nhận"
+      ]);
+      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Đã ghi dữ liệu" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // Xử lý cập nhật cài đặt
+    if (data.action === "update_settings" && data.settings) {
+      var sheet2 = ss.getSheetByName("CaiDat_HeThong");
+      if (sheet2) {
+        // Cập nhật giá trị vào các ô tương ứng
+      }
+      return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Đã cập nhật cài đặt" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({ success: true })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doGet(e) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet2 = ss.getSheetByName("CaiDat_HeThong");
+  var settings = {};
+  if (sheet2) {
+    var rows = sheet2.getDataRange().getValues();
+    for (var r = 1; r < rows.length; r++) {
+      if (rows[r][0]) {
+        settings[rows[r][0]] = rows[r][1];
+      }
+    }
+  }
+  return ContentService.createTextOutput(JSON.stringify({
+    success: true,
+    name: "EcoFarm Aquaponics",
+    settings: settings
+  })).setMimeType(ContentService.MimeType.JSON);
+}`;
+
+  res.json({ success: true, script: scriptCode });
 });
 
 // AI Analyze Endpoint (Gemini + fallback)

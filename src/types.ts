@@ -171,6 +171,7 @@ export interface Device {
   lastTelemetry: string;
   rssi: number;
   ipAddress?: string;
+  activeKey?: string;
   credentials: DeviceCredential[];
 }
 
@@ -328,6 +329,9 @@ export interface GoogleSheetsData {
   lastUpdate: string | null;
   rowsCount: number;
   records: SensorData[];
+  message?: string;
+  isNewOrEmpty?: boolean;
+  appsScriptUrl?: string;
   error?: string;
 }
 

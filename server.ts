@@ -2408,6 +2408,9 @@ app.get('/api/sheets/apps-script-code', (req, res) => {
 // BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 3 Tab và định dạng màu sắc chuẩn
 function khoiTaoBaTabEcoFarm() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    throw new Error("Không tìm thấy bảng tính Google Sheet đang mở. Vui lòng mở Apps Script bằng cách: Mở file Google Sheet của bạn -> Bấm menu 'Tiện ích mở rộng' (Extensions) -> Chọn 'Apps Script' rồi dán mã vào!");
+  }
 
   // 1. TẠO TAB 1: DuLieu_NhatKy (Nhật ký quan sát tổng hợp)
   var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
@@ -2537,21 +2540,26 @@ function khoiTaoBaTabEcoFarm() {
     ss.deleteSheet(defaultSheet);
   }
 
-  SpreadsheetApp.getUi().alert("✅ Đã khởi tạo thành công 3 Tab: 'DuLieu_NhatKy', 'CaiDat_HeThong' và 'data_sensor' (sẵn sàng vẽ biểu đồ)!");
+  thongBaoAnToan("✅ Đã khởi tạo thành công 3 Tab: 'DuLieu_NhatKy', 'CaiDat_HeThong' và 'data_sensor' (sẵn sàng vẽ biểu đồ)!", "Khởi Tạo Thành Công");
+  return "✅ Khởi tạo thành công 3 Tab: DuLieu_NhatKy, CaiDat_HeThong, data_sensor";
 }
 
 // Giữ lại alias hàm cũ để người dùng quen tay vẫn chạy bình thường
 function khoiTaoHaiTabEcoFarm() {
-  khoiTaoBaTabEcoFarm();
+  return khoiTaoBaTabEcoFarm();
 }
 
 // BƯỚC 2 (TÙY CHỌN TIỆN ÍCH): Tự động tạo Biểu Đồ Đường (Line Chart) trên Tab data_sensor
 function taoBieuDoDataSensor() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    thongBaoAnToan("Không tìm thấy bảng tính Google Sheet đang mở.", "Lỗi");
+    return "Không tìm thấy bảng tính";
+  }
   var sheet = ss.getSheetByName("data_sensor");
   if (!sheet) {
-    SpreadsheetApp.getUi().alert("Chưa tìm thấy tab 'data_sensor'. Vui lòng chạy hàm 'khoiTaoBaTabEcoFarm' trước!");
-    return;
+    thongBaoAnToan("Chưa tìm thấy tab 'data_sensor'. Vui lòng chạy hàm 'khoiTaoBaTabEcoFarm' trước!", "Lưu Ý");
+    return "Chưa tìm thấy tab 'data_sensor'";
   }
 
   // Xóa các biểu đồ cũ trên sheet nếu có để không bị trùng lặp
@@ -2588,16 +2596,49 @@ function taoBieuDoDataSensor() {
     .build();
 
   sheet.insertChart(chart);
-  SpreadsheetApp.getUi().alert("✅ Đã vẽ thành công Biểu Đồ Thời Gian Thực trên tab 'data_sensor'!");
+  thongBaoAnToan("✅ Đã vẽ thành công Biểu Đồ Thời Gian Thực trên tab 'data_sensor'!", "Vẽ Biểu Đồ Thành Công");
+  return "✅ Đã vẽ thành công Biểu Đồ Thời Gian Thực trên tab data_sensor";
 }
 
 // Tự động tạo menu điều khiển ngay trên giao diện Google Sheets khi mở tệp
 function onOpen() {
-  var ui = SpreadsheetApp.getUi();
-  ui.createMenu("🌿 EcoFarm IoT")
-    .addItem("1. Khởi Tạo 3 Tab Chuẩn", "khoiTaoBaTabEcoFarm")
-    .addItem("2. Tự Động Vẽ Biểu Đồ data_sensor", "taoBieuDoDataSensor")
-    .addToUi();
+  try {
+    var ui = SpreadsheetApp.getUi();
+    if (ui && typeof ui.createMenu === "function") {
+      ui.createMenu("🌿 EcoFarm IoT")
+        .addItem("1. Khởi Tạo 3 Tab Chuẩn", "khoiTaoBaTabEcoFarm")
+        .addItem("2. Tự Động Vẽ Biểu Đồ data_sensor", "taoBieuDoDataSensor")
+        .addToUi();
+    }
+  } catch (e) {
+    Logger.log("Không thể tạo Menu UI (onOpen): " + e.toString());
+  }
+}
+
+// Hàm thông báo thông minh & an toàn: tự động tương thích khi chạy từ Editor, Webhook hoặc Menu
+function thongBaoAnToan(message, title) {
+  title = title || "EcoFarm IoT";
+  // 1. Thử hiển thị pop-up Alert nếu đang ở ngữ cảnh giao diện người dùng
+  try {
+    var ui = SpreadsheetApp.getUi();
+    if (ui && typeof ui.alert === "function") {
+      ui.alert(title, message, ui.ButtonSet.OK);
+      return;
+    }
+  } catch (errUi) {
+    // Không có UI context (khi chạy từ Apps Script Editor hoặc Web App Webhook)
+  }
+
+  // 2. Thử hiển thị toast nhỏ ở góc dưới bảng tính
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (ss && typeof ss.toast === "function") {
+      ss.toast(message, title, 6);
+    }
+  } catch (errToast) {}
+
+  // 3. Luôn ghi log vào Execution Log của Apps Script
+  Logger.log("[" + title + "] " + message);
 }
 
 // BƯỚC 3: Nhận dữ liệu gửi từ Webhook để ghi đồng thời vào Nhật Ký, Cài Đặt và data_sensor

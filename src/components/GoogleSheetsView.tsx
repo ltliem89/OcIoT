@@ -1282,6 +1282,13 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
               </div>
 
               {/* Code Viewer */}
+              <div className="flex items-center gap-2 p-2.5 bg-emerald-950/40 border border-emerald-800/40 rounded-lg text-emerald-300 text-[11px]">
+                <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  <b>Đã tích hợp cơ chế Safe Execution Context:</b> Tương thích 100% khi bấm nút <i>Chạy (Run)</i> trực tiếp trong trình soạn thảo Apps Script, tự động chuyển đổi thông báo an toàn giữa Alert UI, Toast và Execution Log mà không bao giờ gặp lỗi <code>Cannot call SpreadsheetApp.getUi() from this context</code>.
+                </span>
+              </div>
+
               <div className="relative">
                 <pre className="p-4 bg-slate-950 rounded-xl border border-slate-800 text-[11px] font-mono text-emerald-300 overflow-x-auto max-h-80 leading-relaxed selection:bg-emerald-900 selection:text-white">
                   {scriptCode || '// Đang nạp mã Apps Script...'}

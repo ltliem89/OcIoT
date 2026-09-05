@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Settings as SettingsIcon,
   Cpu,
@@ -19,9 +19,26 @@ import {
   RotateCw,
   ShieldCheck,
   Zap,
+  History,
+  RotateCcw,
+  Download,
+  Search,
+  Filter,
+  ArrowRight,
+  Clock,
+  ChevronRight,
+  ShieldAlert,
+  Sparkles,
+  Check,
 } from 'lucide-react';
-import type { SystemSettings } from '../types.ts';
-import { syncESPThresholds } from '../lib/api.ts';
+import type { SystemSettings, SettingsHistoryEntry } from '../types.ts';
+import { syncESPThresholds, rollbackSettings, fetchSettingsHistory } from '../lib/api.ts';
+import {
+  getLocalSettingsHistory,
+  addSettingsHistoryEntry,
+  exportSettingsHistoryCsv,
+  saveLocalSettingsHistory,
+} from '../lib/settingsHistory.ts';
 
 interface SettingsViewProps {
   settings: SystemSettings;
@@ -39,9 +56,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [isSyncingESP, setIsSyncingESP] = useState(false);
   const [syncStatusMsg, setSyncStatusMsg] = useState<string | null>(null);
 
+  // Sub-tabs: 'form' (parameters) or 'history' (audit trail & rollback)
+  const [activeSubTab, setActiveSubTab] = useState<'form' | 'history'>('form');
+  const [historyList, setHistoryList] = useState<SettingsHistoryEntry[]>([]);
+  const [searchHistoryQuery, setSearchHistoryQuery] = useState('');
+  const [filterSource, setFilterSource] = useState<string>('ALL');
+  const [rollbackConfirmId, setRollbackConfirmId] = useState<string | null>(null);
+  const [manualNote, setManualNote] = useState('');
+  const [isCreatingSnapshot, setIsCreatingSnapshot] = useState(false);
+
+  // Sync state if initial settings change
+  useEffect(() => {
+    setFormData(settings);
+  }, [settings]);
+
+  // Load audit history on mount
+  useEffect(() => {
+    const local = getLocalSettingsHistory();
+    setHistoryList(local);
+
+    fetchSettingsHistory().then((serverHistory) => {
+      if (serverHistory && serverHistory.length > 0) {
+        // Merge without duplicates
+        const map = new Map<string, SettingsHistoryEntry>();
+        [...serverHistory, ...local].forEach((item) => {
+          if (item && item.id) map.set(item.id, item);
+        });
+        const merged = Array.from(map.values()).sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        );
+        setHistoryList(merged);
+        saveLocalSettingsHistory(merged);
+      }
+    });
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     await onSaveSettings(formData);
+
+    // Record history
+    const entry = addSettingsHistoryEntry(settings, formData, 'WEB_DASHBOARD');
+    if (entry) {
+      setHistoryList((prev) => [entry, ...prev]);
+    }
+
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 3500);
   };
@@ -52,6 +111,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       setSyncStatusMsg(null);
       // Save settings to server first
       await onSaveSettings(formData);
+
+      // Record history
+      const entry = addSettingsHistoryEntry(settings, formData, 'ESP_SYNC');
+      if (entry) {
+        setHistoryList((prev) => [entry, ...prev]);
+      }
+
       // Push sync command directly to ESP
       const res = await syncESPThresholds(formData);
       setSyncStatusMsg(res.message || 'Đã đồng bộ thành công ngưỡng xuống ESP32-S3');
@@ -67,25 +133,121 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const handleRollback = async (entry: SettingsHistoryEntry) => {
+    try {
+      // 1. Update form data
+      setFormData(entry.snapshot);
+      // 2. Save settings
+      await onSaveSettings(entry.snapshot);
+      // 3. Rollback via API
+      await rollbackSettings(entry.id, entry.snapshot);
+
+      // 4. Add rollback log
+      const rollbackEntry: SettingsHistoryEntry = {
+        id: `cfg_rollback_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        source: 'ROLLBACK',
+        description: `Khôi phục về phiên bản (${new Date(entry.timestamp).toLocaleString('vi-VN')})`,
+        changes: [
+          {
+            key: 'all',
+            label: 'Khôi phục toàn bộ thông số từ lịch sử',
+            oldValue: 'Bản hiện tại',
+            newValue: `Bản ${entry.id}`,
+          },
+        ],
+        snapshot: JSON.parse(JSON.stringify(entry.snapshot)),
+      };
+      const updated = [rollbackEntry, ...historyList];
+      setHistoryList(updated);
+      saveLocalSettingsHistory(updated);
+
+      setRollbackConfirmId(null);
+      setSyncStatusMsg(`Đã khôi phục thành công cấu hình từ phiên bản [${entry.id}]!`);
+      setSavedSuccess(true);
+      setTimeout(() => {
+        setSyncStatusMsg(null);
+        setSavedSuccess(false);
+      }, 4500);
+    } catch (err: any) {
+      setSyncStatusMsg(`Lỗi khôi phục: ${err.message}`);
+    }
+  };
+
+  const handleCreateSnapshot = () => {
+    if (!manualNote.trim()) return;
+    const manualEntry: SettingsHistoryEntry = {
+      id: `cfg_manual_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      source: 'WEB_DASHBOARD',
+      description: `Bản lưu thủ công: ${manualNote.trim()}`,
+      changes: [
+        {
+          key: 'checkpoint',
+          label: 'Lưu điểm kiểm tra thủ công (Snapshot)',
+          oldValue: 'Hiện tại',
+          newValue: 'Đã lưu',
+        },
+      ],
+      snapshot: JSON.parse(JSON.stringify(formData)),
+    };
+    const updated = [manualEntry, ...historyList];
+    setHistoryList(updated);
+    saveLocalSettingsHistory(updated);
+    setManualNote('');
+    setIsCreatingSnapshot(false);
+    setSyncStatusMsg('Đã tạo điểm sao lưu cấu hình thành công!');
+    setSavedSuccess(true);
+    setTimeout(() => {
+      setSyncStatusMsg(null);
+      setSavedSuccess(false);
+    }, 3500);
+  };
+
+  const handleExportCsv = () => {
+    const csvContent = exportSettingsHistoryCsv(historyList);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `ecofarm_settings_audit_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  // Filtered history
+  const filteredHistory = historyList.filter((item) => {
+    const matchSource = filterSource === 'ALL' || item.source === filterSource;
+    const q = searchHistoryQuery.toLowerCase().trim();
+    if (!q) return matchSource;
+
+    const matchText =
+      item.id.toLowerCase().includes(q) ||
+      item.description.toLowerCase().includes(q) ||
+      item.changes.some((c) => c.label.toLowerCase().includes(q) || c.key.toLowerCase().includes(q));
+    return matchSource && matchText;
+  });
+
   return (
     <div className="space-y-6 pb-20 sm:pb-6 max-w-5xl mx-auto">
       {/* Top Banner & Header */}
       <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-900 flex items-center justify-center text-white shadow-md shadow-slate-200">
+          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-slate-900 to-indigo-900 flex items-center justify-center text-white shadow-md shadow-slate-200 shrink-0">
             <Sliders className="w-6 h-6 text-emerald-400" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-base sm:text-xl font-bold text-slate-900">
-                Cài Đặt Chức Năng & Ngưỡng ESP
+                Cài Đặt Chức Năng & Lịch Sử
               </h2>
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 uppercase tracking-wide">
-                OC IoT Firmware v2.4
+                Audit Trail v4.2
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Tùy biến các ngưỡng TDS, độ ẩm đất, mực nước phao, định thời rơ-le và chu kỳ truyền nhận ESP32-S3
+              Tùy biến ngưỡng TDS, độ ẩm, phao nước, định thời bơm và theo dõi lịch sử thay đổi cấu hình
             </p>
           </div>
         </div>
@@ -94,25 +256,83 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={handleSyncToESP}
-            disabled={isSyncingESP || isLoading}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold text-xs shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
-            title="Đồng bộ ngay lập tức các ngưỡng xuống vi điều khiển ESP32-S3"
+            onClick={() => setActiveSubTab(activeSubTab === 'form' ? 'history' : 'form')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-semibold text-xs transition-all cursor-pointer border ${
+              activeSubTab === 'history'
+                ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
+            }`}
           >
-            <Send className={`w-3.5 h-3.5 ${isSyncingESP ? 'animate-bounce' : ''}`} />
-            <span>{isSyncingESP ? 'Đang gửi xuống ESP...' : 'Đồng Bộ Xuống ESP32'}</span>
+            <History className="w-3.5 h-3.5" />
+            <span>Lịch Sử ({historyList.length})</span>
           </button>
 
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={isLoading}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>Lưu Cấu Hình</span>
-          </button>
+          {activeSubTab === 'form' && (
+            <>
+              <button
+                type="button"
+                onClick={handleSyncToESP}
+                disabled={isSyncingESP || isLoading}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-semibold text-xs shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+                title="Đồng bộ ngay lập tức các ngưỡng xuống vi điều khiển ESP32-S3"
+              >
+                <Send className={`w-3.5 h-3.5 ${isSyncingESP ? 'animate-bounce' : ''}`} />
+                <span>{isSyncingESP ? 'Đang gửi...' : 'Đồng Bộ Xuống ESP32'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={isLoading}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold text-xs shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Lưu Cấu Hình</span>
+              </button>
+            </>
+          )}
+
+          {activeSubTab === 'history' && (
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shadow-sm transition-all active:scale-95 cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Xuất CSV</span>
+            </button>
+          )}
         </div>
+      </div>
+
+      {/* Sub-Navigation Switcher */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-2">
+        <button
+          onClick={() => setActiveSubTab('form')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+            activeSubTab === 'form'
+              ? 'bg-slate-900 text-white shadow-xs'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <Sliders className="w-4 h-4" />
+          <span>Thông Số Ngưỡng & Thiết Bị</span>
+        </button>
+
+        <button
+          onClick={() => setActiveSubTab('history')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer relative ${
+            activeSubTab === 'history'
+              ? 'bg-slate-900 text-white shadow-xs'
+              : 'text-slate-600 hover:bg-slate-100'
+          }`}
+        >
+          <History className="w-4 h-4" />
+          <span>Lịch Sử Thay Đổi & Khôi Phục (Audit Trail)</span>
+          <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500 text-white">
+            {historyList.length}
+          </span>
+        </button>
       </div>
 
       {/* Success Notification Bar */}
@@ -128,6 +348,243 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
+      {/* ========================================================================= */}
+      {/* TAB 2: SETTINGS HISTORY & AUDIT TRAIL (TRUY XUẤT LỊCH SỬ & KHÔI PHỤC) */}
+      {/* ========================================================================= */}
+      {activeSubTab === 'history' && (
+        <div className="space-y-4 animate-in fade-in">
+          {/* Top Summary Stats */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-xs">
+              <span className="text-[11px] font-semibold text-slate-500 block uppercase">
+                Tổng Số Phiên Bản Đã Lưu
+              </span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-2xl font-black text-slate-900">{historyList.length}</span>
+                <span className="text-xs text-slate-500">lần thay đổi</span>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-xs">
+              <span className="text-[11px] font-semibold text-slate-500 block uppercase">
+                Lần Sửa Đổi Gần Nhất
+              </span>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className="text-sm font-bold text-slate-900 truncate">
+                  {historyList[0]
+                    ? new Date(historyList[0].timestamp).toLocaleString('vi-VN')
+                    : 'Chưa có'}
+                </span>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-xs">
+              <span className="text-[11px] font-semibold text-slate-500 block uppercase">
+                Điểm Khôi Phục Thủ Công
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsCreatingSnapshot(!isCreatingSnapshot)}
+                className="mt-1 text-xs font-bold text-indigo-600 hover:text-indigo-700 flex items-center gap-1 cursor-pointer"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>+ Tạo Bản Lưu Checkpoint Mới</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Create Manual Checkpoint Box */}
+          {isCreatingSnapshot && (
+            <div className="p-4 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-indigo-600" /> Tạo Điểm Lưu Cấu Hình Nhanh
+                </span>
+                <button
+                  onClick={() => setIsCreatingSnapshot(false)}
+                  className="text-xs text-slate-400 hover:text-slate-600 cursor-pointer"
+                >
+                  Đóng
+                </button>
+              </div>
+              <p className="text-[11px] text-indigo-800">
+                Nhập ghi chú cho bản sao lưu cấu hình hiện tại trước khi bạn thay đổi các thông số nhạy cảm:
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={manualNote}
+                  onChange={(e) => setManualNote(e.target.value)}
+                  placeholder="Ví dụ: Cấu hình mùa mưa, TDS hồ ốc 600, tưới 30s..."
+                  className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-indigo-200 bg-white text-slate-900 focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleCreateSnapshot}
+                  className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"
+                >
+                  Lưu Điểm Này
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Search & Filter Bar */}
+          <div className="p-3 bg-white border border-slate-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xs">
+            <div className="relative w-full sm:w-72">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                value={searchHistoryQuery}
+                onChange={(e) => setSearchHistoryQuery(e.target.value)}
+                placeholder="Tìm thông số, mã hoặc ghi chú..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-200 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500 text-slate-900"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              <Filter className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <select
+                value={filterSource}
+                onChange={(e) => setFilterSource(e.target.value)}
+                className="text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 bg-white text-slate-700 focus:ring-2 focus:ring-indigo-500 cursor-pointer"
+              >
+                <option value="ALL">Tất Cả Nguồn Thay Đổi</option>
+                <option value="WEB_DASHBOARD">Giao Diện Web</option>
+                <option value="ESP_SYNC">Đồng Bộ ESP32</option>
+                <option value="ROLLBACK">Khôi Phục Bản Cũ</option>
+                <option value="GOOGLE_SHEETS">Từ Google Sheets</option>
+                <option value="IMPORT">Khởi Tạo Hệ Thống</option>
+              </select>
+            </div>
+          </div>
+
+          {/* History List Cards */}
+          <div className="space-y-3">
+            {filteredHistory.length === 0 ? (
+              <div className="p-8 text-center bg-white rounded-xl border border-slate-200 text-slate-500 text-xs">
+                Không tìm thấy bản ghi lịch sử nào phù hợp với bộ lọc.
+              </div>
+            ) : (
+              filteredHistory.map((entry, idx) => {
+                const sourceConfig: Record<string, { label: string; bg: string; text: string }> = {
+                  WEB_DASHBOARD: { label: 'Web Dashboard', bg: 'bg-blue-50', text: 'text-blue-700' },
+                  ESP_SYNC: { label: 'Đồng Bộ ESP32', bg: 'bg-emerald-50', text: 'text-emerald-700' },
+                  ROLLBACK: { label: 'Khôi Phục', bg: 'bg-purple-50', text: 'text-purple-700' },
+                  IMPORT: { label: 'Khởi Tạo', bg: 'bg-slate-100', text: 'text-slate-700' },
+                  GOOGLE_SHEETS: { label: 'Google Sheets', bg: 'bg-amber-50', text: 'text-amber-700' },
+                };
+                const src = sourceConfig[entry.source] || { label: entry.source, bg: 'bg-slate-100', text: 'text-slate-700' };
+
+                return (
+                  <div
+                    key={entry.id}
+                    className="p-4 bg-white rounded-xl border border-slate-200 hover:border-indigo-200 transition-all shadow-xs space-y-3"
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${src.bg} ${src.text}`}>
+                          {src.label}
+                        </span>
+                        <span className="text-xs font-bold text-slate-900">
+                          {entry.description}
+                        </span>
+                        {idx === 0 && (
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                            Phiên bản mới nhất
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3 text-xs text-slate-500">
+                        <span className="flex items-center gap-1 font-mono text-[11px]">
+                          <Clock className="w-3 h-3 text-slate-400" />
+                          {new Date(entry.timestamp).toLocaleString('vi-VN')}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400">
+                          #{entry.id.slice(-6)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Diff changes preview */}
+                    <div className="space-y-1.5">
+                      <span className="text-[11px] font-semibold text-slate-500 block">
+                        Chi tiết thông số thay đổi ({entry.changes.length}):
+                      </span>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        {entry.changes.map((diff, dIdx) => (
+                          <div
+                            key={dIdx}
+                            className="p-2 rounded-lg bg-slate-50 border border-slate-100 text-[11px] flex items-center justify-between gap-2"
+                          >
+                            <span className="text-slate-700 font-medium truncate" title={diff.label}>
+                              {diff.label}
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0 font-mono font-semibold">
+                              <span className="text-slate-400 line-through">
+                                {String(diff.oldValue)}
+                              </span>
+                              <ArrowRight className="w-3 h-3 text-slate-400" />
+                              <span className="text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                {String(diff.newValue)} {diff.unit || ''}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Footer Actions */}
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs">
+                      <span className="text-[11px] text-slate-400">
+                        Thiết bị: <strong className="text-slate-600">{entry.snapshot?.deviceId || 'ESP32S3_ECO_01'}</strong>
+                      </span>
+
+                      {rollbackConfirmId === entry.id ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-rose-600 font-semibold">
+                            Xác nhận hoàn tác về bản này?
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleRollback(entry)}
+                            className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs cursor-pointer shadow-xs"
+                          >
+                            Đồng Ý Khôi Phục
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRollbackConfirmId(null)}
+                            className="px-2 py-1 rounded-lg bg-slate-100 text-slate-700 text-xs cursor-pointer"
+                          >
+                            Hủy
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setRollbackConfirmId(entry.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 text-slate-700 font-semibold text-xs transition-colors cursor-pointer"
+                          title="Hoàn tác cấu hình hiện tại về phiên bản này"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          <span>Khôi Phục Bản Này</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* TAB 1: FORM PARAMETERS (HIỆN THỊ KHI activeSubTab === 'form') */}
+      {/* ========================================================================= */}
+      {activeSubTab === 'form' && (
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* =========================================================
             SECTION 1: TDS WATER QUALITY THRESHOLDS (OCEAN BLUE THEME)
@@ -809,6 +1266,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
       </form>
+      )}
     </div>
   );
 };

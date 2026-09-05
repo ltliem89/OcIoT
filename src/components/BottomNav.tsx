@@ -148,6 +148,18 @@ export const BottomNav: React.FC<BottomNavProps> = ({
             <span>Google Sheets</span>
           </button>
 
+          <button
+            onClick={() => onSelectTab('settings')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+              activeTab === 'settings'
+                ? 'bg-slate-900 text-white font-bold'
+                : 'text-slate-600 hover:bg-slate-100'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>Cài Đặt & Lịch Sử</span>
+          </button>
+
           {onOpenConfigMode && (
             <button
               onClick={onOpenConfigMode}
@@ -304,6 +316,29 @@ export const BottomNav: React.FC<BottomNavProps> = ({
                     </span>
                     <span className="text-[10px] text-slate-500">
                       Báo cáo và trích xuất dữ liệu đám mây
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-slate-400" />
+              </button>
+
+              <button
+                onClick={() => {
+                  onSelectTab('settings');
+                  setIsMoreSheetOpen(false);
+                }}
+                className="w-full p-3 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 flex items-center justify-between text-left cursor-pointer min-h-[48px]"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-slate-900 text-emerald-400 flex items-center justify-center">
+                    <Sliders className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-900 block">
+                      Cài Đặt Ngưỡng & Lịch Sử
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      Tùy biến TDS, phao nước, chu kỳ và truy xuất lịch sử thay đổi
                     </span>
                   </div>
                 </div>

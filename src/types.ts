@@ -379,3 +379,20 @@ export interface SystemSettings {
   cameraStreamUrl: string;
   aiSensitivity: 'low' | 'medium' | 'high';
 }
+
+export interface SettingsDiffItem {
+  key: string;
+  label: string;
+  oldValue: any;
+  newValue: any;
+  unit?: string;
+}
+
+export interface SettingsHistoryEntry {
+  id: string;
+  timestamp: string;
+  source: 'WEB_DASHBOARD' | 'ESP_SYNC' | 'ROLLBACK' | 'IMPORT' | 'GOOGLE_SHEETS';
+  description: string;
+  changes: SettingsDiffItem[];
+  snapshot: SystemSettings;
+}

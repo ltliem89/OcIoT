@@ -2668,13 +2668,72 @@ app.get('/api/vision/status', (req, res) => {
   });
 });
 
+let settingsAuditLog: any[] = [
+  {
+    id: 'cfg_init_v4',
+    timestamp: new Date(Date.now() - 3600000 * 48).toISOString(),
+    source: 'IMPORT',
+    description: 'Khởi tạo cấu hình trang trại sinh thái chuẩn (Baseline v4.2)',
+    changes: [
+      { key: 'tdsMin', label: 'TDS Tối Thiểu (Cảnh báo thiếu dinh dưỡng)', oldValue: 'Chưa đặt', newValue: 200, unit: 'ppm' },
+      { key: 'tdsMax', label: 'TDS Tối Đa (Ngưỡng an toàn ốc & cá)', oldValue: 'Chưa đặt', newValue: 750, unit: 'ppm' },
+      { key: 'soilMoistureMin', label: 'Độ ẩm đất tối thiểu (Bật bơm tưới)', oldValue: 'Chưa đặt', newValue: 50, unit: '%' },
+      { key: 'pump2IrrigationDurationSeconds', label: 'Thời gian Bơm 2 tưới rau mỗi chu kỳ', oldValue: 'Chưa đặt', newValue: 45, unit: 'giây' },
+    ],
+    snapshot: JSON.parse(JSON.stringify(systemSettings)),
+  },
+];
+
 app.get('/api/settings', (req, res) => {
   res.json(systemSettings);
 });
 
 app.post('/api/settings', (req, res) => {
+  const prevSettings = JSON.parse(JSON.stringify(systemSettings));
   systemSettings = { ...systemSettings, ...req.body };
   res.json({ success: true, settings: systemSettings });
+});
+
+app.get('/api/settings/history', (req, res) => {
+  res.json({
+    success: true,
+    history: settingsAuditLog,
+  });
+});
+
+app.post('/api/settings/history', (req, res) => {
+  const entry = req.body;
+  if (entry && entry.id) {
+    // Deduplicate and prepend
+    settingsAuditLog = [entry, ...settingsAuditLog.filter((h) => h.id !== entry.id)].slice(0, 50);
+  }
+  res.json({ success: true, count: settingsAuditLog.length });
+});
+
+app.post('/api/settings/rollback', (req, res) => {
+  const { historyId, snapshot } = req.body;
+  let targetSnapshot = snapshot;
+  if (!targetSnapshot && historyId) {
+    const found = settingsAuditLog.find((h) => h.id === historyId);
+    if (found) targetSnapshot = found.snapshot;
+  }
+
+  if (targetSnapshot) {
+    const prev = JSON.parse(JSON.stringify(systemSettings));
+    systemSettings = { ...systemSettings, ...targetSnapshot };
+    const rollbackEntry = {
+      id: `cfg_rollback_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      source: 'ROLLBACK',
+      description: `Khôi phục về phiên bản cấu hình (${historyId || 'Lịch sử trước'})`,
+      changes: [{ key: 'all', label: 'Khôi phục toàn bộ thông số', oldValue: 'Phiên bản trước', newValue: 'Bản sao lưu' }],
+      snapshot: JSON.parse(JSON.stringify(systemSettings)),
+    };
+    settingsAuditLog = [rollbackEntry, ...settingsAuditLog].slice(0, 50);
+    res.json({ success: true, message: 'Đã khôi phục cài đặt thành công', settings: systemSettings });
+  } else {
+    res.status(404).json({ success: false, message: 'Không tìm thấy phiên bản sao lưu để khôi phục' });
+  }
 });
 
 app.get('/api/esp/thresholds', (req, res) => {

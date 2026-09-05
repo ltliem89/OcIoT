@@ -10,6 +10,7 @@ import { ChartsView } from './components/ChartsView.tsx';
 import { HistoryView } from './components/HistoryView.tsx';
 import { CameraAIView } from './components/CameraAIView.tsx';
 import { GoogleSheetsView } from './components/GoogleSheetsView.tsx';
+import { SettingsView } from './components/SettingsView.tsx';
 import { AlertsPanel } from './components/AlertsPanel.tsx';
 
 import {
@@ -30,6 +31,8 @@ import {
   fetchV4Alerts,
   acknowledgeV4Alert,
   fetchV4AuditLogs,
+  fetchSystemSettings,
+  saveSystemSettings,
 } from './lib/api.ts';
 
 import {
@@ -64,6 +67,7 @@ import type {
   ActiveAlarm,
   AuditLogItem,
   ProjectConfigSnapshot,
+  SystemSettings,
 } from './types.ts';
 
 export default function App() {
@@ -94,6 +98,47 @@ export default function App() {
   const [activeAlarms, setActiveAlarms] = useState<ActiveAlarm[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
 
+  // Hardware & System Settings State (TDS, Soil, Relays, ESP intervals)
+  const [systemSettings, setSystemSettings] = useState<SystemSettings>({
+    deviceId: 'ESP32S3_ECO_01',
+    offlineTimeoutSeconds: 45,
+    googleSheetsUrl: '',
+    tdsMin: 200,
+    tdsMax: 750,
+    tdsCritical: 950,
+    tdsCalibrationOffset: 0,
+    soilMoistureMin: 50,
+    soilMoistureMax: 80,
+    soilMoistureCritical: 30,
+    soilMoistureCalibrationOffset: 0,
+    waterFloatDebounceSeconds: 3,
+    floatLowSafetyCutoff: true,
+    floatHighAlert: true,
+    pump1MaxContinuousMinutes: 45,
+    pump2IrrigationDurationSeconds: 45,
+    pump2RestIntervalMinutes: 30,
+    buzzerAlertDurationSeconds: 15,
+    buzzerMode: 'CRITICAL_ONLY',
+    espReportIntervalSeconds: 5,
+    espSheetsSyncIntervalSeconds: 60,
+    autoRules: {
+      lowWaterCutPump1: true,
+      lowMoistureStartPump2: true,
+      buzzerOnCriticalAlert: true,
+    },
+    cameraStreamUrl: 'http://192.168.1.100:8080/video',
+    aiSensitivity: 'medium',
+  });
+
+  const handleSaveSystemSettings = async (updates: Partial<SystemSettings>) => {
+    setSystemSettings((prev) => ({ ...prev, ...updates }));
+    try {
+      await saveSystemSettings(updates);
+    } catch (err) {
+      console.warn('Lỗi khi lưu cài đặt xuống backend:', err);
+    }
+  };
+
   // UI Loaders
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -105,7 +150,7 @@ export default function App() {
       setIsRefreshing(true);
 
       // 1. Fetch V4 Project Configuration & System State
-      const [v4Config, v4Vers, v4Devs, v4AlertsRes, v4Audit, iotStatus, historyRes, sheetRes] =
+      const [v4Config, v4Vers, v4Devs, v4AlertsRes, v4Audit, iotStatus, historyRes, sheetRes, sysSettingsRes] =
         await Promise.all([
           fetchV4ProjectConfig().catch(() => null),
           fetchV4Versions().catch(() => null),
@@ -115,6 +160,7 @@ export default function App() {
           fetchIoTStatus().catch(() => null),
           fetchHistoryData(selectedRange).catch(() => ({ data: [] })),
           fetchGoogleSheets().catch(() => null),
+          fetchSystemSettings().catch(() => null),
         ]);
 
       if (v4Config) {
@@ -130,6 +176,10 @@ export default function App() {
       if (v4Devs?.devices) setDevices(v4Devs.devices);
       if (v4AlertsRes?.activeAlarms) setActiveAlarms(v4AlertsRes.activeAlarms);
       if (v4Audit?.logs) setAuditLogs(v4Audit.logs);
+
+      if (sysSettingsRes) {
+        setSystemSettings((prev) => ({ ...prev, ...sysSettingsRes }));
+      }
 
       if (iotStatus) {
         setStatus(iotStatus);
@@ -524,20 +574,11 @@ export default function App() {
             )}
 
             {activeTab === 'settings' && (
-              <div className="bg-white rounded-xl p-6 border border-slate-200 text-center space-y-3">
-                <h3 className="text-base font-bold text-slate-900">
-                  Cài Đặt Đã Được Tích Hợp Vào Chế Độ Cấu Hình V4.0
-                </h3>
-                <p className="text-xs text-slate-500 max-w-md mx-auto">
-                  Theo tiêu chuẩn V4.0, cấu hình hệ thống, ngưỡng cảm biến, Display Builder và phiên bản được quản lý tập trung trong Chế Độ Cấu Hình.
-                </p>
-                <button
-                  onClick={() => setIsConfigMode(true)}
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs shadow-xs cursor-pointer min-h-[44px]"
-                >
-                  Mở Chế Độ Cấu Hình (Configuration Mode)
-                </button>
-              </div>
+              <SettingsView
+                settings={systemSettings}
+                onSaveSettings={handleSaveSystemSettings}
+                isLoading={isRefreshing}
+              />
             )}
           </>
         )}

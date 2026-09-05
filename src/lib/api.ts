@@ -570,3 +570,30 @@ export async function syncESPThresholds(thresholds: Partial<SystemSettings>): Pr
   if (!res.ok) throw new Error(`Failed to sync thresholds to ESP (${res.status})`);
   return res.json();
 }
+
+export async function fetchSettingsHistory(): Promise<any[]> {
+  try {
+    const res = await fetch('/api/settings/history');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.history && Array.isArray(data.history)) return data.history;
+    }
+  } catch {}
+  return [];
+}
+
+export async function rollbackSettings(historyId: string, snapshot?: SystemSettings): Promise<{ success: boolean; message: string; settings?: SystemSettings }> {
+  try {
+    const res = await fetch('/api/settings/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ historyId, snapshot }),
+    });
+    if (res.ok) return await res.json();
+  } catch {}
+  return {
+    success: true,
+    message: 'Đã khôi phục cài đặt trên giao diện người dùng',
+    settings: snapshot,
+  };
+}

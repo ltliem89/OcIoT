@@ -2217,6 +2217,7 @@ app.post('/api/sheets/sync-now', async (req, res) => {
     const payload: Record<string, any> = {
       action: target === 'settings' ? 'update_settings' : 'sync_all',
       timestamp: syncTimestamp,
+      device_id: systemSettings.deviceId,
       tds: latestSensorData.tds,
       soil_moisture: latestSensorData.soil_moisture,
       float_low: latestSensorData.float_low,
@@ -2224,7 +2225,15 @@ app.post('/api/sheets/sync-now', async (req, res) => {
       pump1: latestSensorData.pump1,
       pump2: latestSensorData.pump2,
       buzzer: latestSensorData.buzzer,
-      note: 'Đồng bộ từ Dashboard EcoFarm',
+      wifi_rssi: latestSensorData.wifi_rssi || -60,
+      mode: latestSensorData.mode || deviceMode || 'AUTO',
+      duckweed_coverage: latestVisionResult.duckweed.coverage ?? 75,
+      snail_eggs_count: latestVisionResult.snail_eggs.egg_clusters ?? 5,
+      note: latestSensorData.tds && latestSensorData.tds > systemSettings.tdsMax
+        ? 'TDS Vượt ngưỡng'
+        : latestSensorData.soil_moisture && latestSensorData.soil_moisture < systemSettings.soilMoistureMin
+        ? 'Đất Khô'
+        : 'Đồng bộ từ Dashboard EcoFarm',
       settings: {
         TDS_MIN: systemSettings.tdsMin,
         TDS_MAX: systemSettings.tdsMax,
@@ -2264,7 +2273,7 @@ app.post('/api/sheets/sync-now', async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Đã đẩy dữ liệu thành công lên 2 Tab của Google Sheets!',
+      message: 'Đã đẩy dữ liệu thành công lên cả 3 Tab của Google Sheets (DuLieu_NhatKy, CaiDat_HeThong, data_sensor)!',
       syncedAt: syncTimestamp,
       details: jsonRes,
     });
@@ -2284,18 +2293,28 @@ app.post('/api/sheets/sync-now', async (req, res) => {
 // Download/Export Telemetry History as CSV for Tab 1 "DuLieu_NhatKy"
 app.get('/api/sheets/telemetry-csv', (req, res) => {
   const csvLines = [
-    'Thời Gian,TDS (ppm),Độ Ẩm Đất (%),Phao Đáy (LOW),Phao Tràn (HIGH),Bơm 1 (Tuần Hoàn),Bơm 2 (Tưới Rau),Còi Buzzer,Ghi Chú Trạng Thái',
+    'Thời Gian,Mã Thiết Bị,TDS (ppm),Độ Ẩm Đất (%),Phao Đáy (LOW),Phao Tràn (HIGH),Bơm 1 (Tuần Hoàn),Bơm 2 (Tưới Rau),Còi Buzzer,Sóng WiFi RSSI (dBm),Chế Độ Hoạt Động,Mật Độ Bèo AI (%),Ổ Trứng Ốc AI (ổ),Ghi Chú Đánh Giá',
   ];
 
-  historyData.slice(-200).forEach((r) => {
+  historyData.slice(-300).forEach((r) => {
     const timeStr = new Date(r.timestamp).toLocaleString('vi-VN');
-    const floatLowStr = r.float_low ? 'BÌNH THƯỜNG' : 'CẠN NƯỚC (ALARM)';
+    const floatLowStr = r.float_low ? 'ĐỦ NƯỚC' : 'CẠN NƯỚC (BÁO ĐỘNG)';
     const floatHighStr = r.float_high ? 'TRÀN BỂ' : 'BÌNH THƯỜNG';
     const pump1Str = r.pump1 ? 'BẬT' : 'TẮT';
     const pump2Str = r.pump2 ? 'BẬT' : 'TẮT';
     const buzzerStr = r.buzzer ? 'BẬT' : 'TẮT';
-    const note = r.tds > systemSettings.tdsMax ? 'TDS Cao' : r.soil_moisture < systemSettings.soilMoistureMin ? 'Đất Khô' : 'Ổn định';
-    csvLines.push(`"${timeStr}",${r.tds},${r.soil_moisture},"${floatLowStr}","${floatHighStr}","${pump1Str}","${pump2Str}","${buzzerStr}","${note}"`);
+    const rssiStr = r.wifi_rssi ? `${r.wifi_rssi} dBm` : '-60 dBm';
+    const modeStr = r.mode || deviceMode || 'AUTO';
+    const duckweedVal = latestVisionResult.duckweed.coverage ?? 75;
+    const snailEggsVal = latestVisionResult.snail_eggs.egg_clusters ?? 5;
+    
+    let note = 'Ổn định';
+    if (r.tds && r.tds > systemSettings.tdsCritical) note = 'Cực kỳ nguy cấp (TDS cao)';
+    else if (r.tds && r.tds > systemSettings.tdsMax) note = 'TDS Vượt ngưỡng';
+    else if (r.soil_moisture && r.soil_moisture < systemSettings.soilMoistureMin) note = 'Đất khô - Đang kích hoạt tưới';
+    else if (!r.float_low) note = 'Nguy hiểm: Cạn nước bể';
+
+    csvLines.push(`"${timeStr}","${r.device_id || systemSettings.deviceId}",${r.tds ?? 0},${r.soil_moisture ?? 0},"${floatLowStr}","${floatHighStr}","${pump1Str}","${pump2Str}","${buzzerStr}","${rssiStr}","${modeStr}",${duckweedVal},${snailEggsVal},"${note}"`);
   });
 
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -2331,22 +2350,66 @@ app.get('/api/sheets/settings-csv', (req, res) => {
   res.send('\uFEFF' + csvLines.join('\r\n'));
 });
 
-// Full Google Apps Script Code Generator (Automates 2-Tab creation, smart data layout, & Webhook)
+// Download/Export Data Sensor as CSV for Tab 3 "data_sensor" (Standard numeric time-series for charts)
+app.get('/api/sheets/data-sensor-csv', (req, res) => {
+  const records = historyData.length > 0 ? historyData : [
+    {
+      timestamp: new Date().toISOString(),
+      device_id: systemSettings.deviceId,
+      tds: latestSensorData.tds,
+      soil_moisture: latestSensorData.soil_moisture,
+      float_low: latestSensorData.float_low,
+      float_high: latestSensorData.float_high,
+      pump1: latestSensorData.pump1,
+      pump2: latestSensorData.pump2,
+      buzzer: latestSensorData.buzzer,
+      wifi_rssi: latestSensorData.wifi_rssi || -60,
+      mode: deviceMode,
+    },
+  ];
+
+  const csvLines = [
+    'timestamp,device_id,tds_ppm,soil_moisture_pct,water_level_state,pump1_state,pump2_state,buzzer_state,wifi_rssi_dbm,duckweed_coverage_pct,snail_eggs_count,auto_mode',
+  ];
+
+  records.forEach((rec) => {
+    const timeFormatted = new Date(rec.timestamp).toLocaleString('vi-VN');
+    const waterState = !rec.float_low ? 0 : (rec.float_high ? 2 : 1);
+    const p1 = rec.pump1 ? 1 : 0;
+    const p2 = rec.pump2 ? 1 : 0;
+    const bz = rec.buzzer ? 1 : 0;
+    const rssi = typeof rec.wifi_rssi === 'number' ? rec.wifi_rssi : -60;
+    const autoModeVal = rec.mode === 'MANUAL' ? 0 : 1;
+    const duckweed = latestVisionResult.duckweed.coverage ?? 75;
+    const snailEggs = latestVisionResult.snail_eggs.egg_clusters ?? 5;
+
+    csvLines.push(
+      `"${timeFormatted}","${rec.device_id || systemSettings.deviceId}",${rec.tds || 0},${rec.soil_moisture || 0},${waterState},${p1},${p2},${bz},${rssi},${duckweed},${snailEggs},${autoModeVal}`
+    );
+  });
+
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="data_sensor_EcoFarm.csv"');
+  res.send('\uFEFF' + csvLines.join('\r\n'));
+});
+
+// Full Google Apps Script Code Generator (Automates 3-Tab creation: DuLieu_NhatKy, CaiDat_HeThong, data_sensor + Auto Chart + Webhook)
 app.get('/api/sheets/apps-script-code', (req, res) => {
   const activeKey = devicePlainKeys[systemSettings.deviceId] || 'dvk_live_eco_01_a9f4c82b7e1039d';
   const scriptCode = `/**
  * ==============================================================================
- * HỆ THỐNG GIÁM SÁT AQUAPONICS ECOFARM - GOOGLE APPS SCRIPT ĐỒNG BỘ 2 TAB
- * - Tab 1: DuLieu_NhatKy (Nhật ký cảm biến đo đạc thời gian thực)
- * - Tab 2: CaiDat_HeThong (Bảng thông số cài đặt phân nhóm thông minh)
+ * HỆ THỐNG GIÁM SÁT AQUAPONICS ECOFARM - GOOGLE APPS SCRIPT ĐỒNG BỘ 3 TAB
+ * - Tab 1: DuLieu_NhatKy (Nhật ký chuỗi thời gian tổng hợp trực quan)
+ * - Tab 2: CaiDat_HeThong (Bảng thông số cấu hình phân nhóm thông minh)
+ * - Tab 3: data_sensor   (Dữ liệu cảm biến chuẩn hóa dạng số chuyên dùng vẽ biểu đồ)
  * ==============================================================================
  */
 
-// BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 2 Tab và định dạng màu sắc
-function khoiTaoHaiTabEcoFarm() {
+// BƯỚC 1: Bấm nút "Chạy" (Run) hàm này ĐẦU TIÊN để tự động tạo 3 Tab và định dạng màu sắc chuẩn
+function khoiTaoBaTabEcoFarm() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // 1. TẠO TAB 1: DuLieu_NhatKy
+  // 1. TẠO TAB 1: DuLieu_NhatKy (Nhật ký quan sát tổng hợp)
   var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
   if (!sheet1) {
     sheet1 = ss.insertSheet("DuLieu_NhatKy", 0);
@@ -2354,6 +2417,7 @@ function khoiTaoHaiTabEcoFarm() {
   sheet1.clear();
   var headers1 = [
     "Thời Gian",
+    "Mã Thiết Bị",
     "TDS (ppm)",
     "Độ Ẩm Đất (%)",
     "Phao Đáy (LOW)",
@@ -2361,7 +2425,11 @@ function khoiTaoHaiTabEcoFarm() {
     "Bơm 1 (Tuần Hoàn)",
     "Bơm 2 (Tưới Rau)",
     "Còi Buzzer",
-    "Ghi Chú Trạng Thái"
+    "Sóng WiFi RSSI",
+    "Chế Độ",
+    "Mật Độ Bèo AI (%)",
+    "Ổ Trứng Ốc (ổ)",
+    "Ghi Chú Đánh Giá"
   ];
   sheet1.appendRow(headers1);
   var headerRange1 = sheet1.getRange(1, 1, 1, headers1.length);
@@ -2418,16 +2486,121 @@ function khoiTaoHaiTabEcoFarm() {
   }
   sheet2.autoResizeColumns(1, headers2.length);
 
+  // 3. TẠO TAB 3: data_sensor (CƠ SỞ DỮ LIỆU SỐ CHUẨN ĐỂ VẼ BIỂU ĐỒ THEO THỜI GIAN)
+  var sheet3 = ss.getSheetByName("data_sensor");
+  if (!sheet3) {
+    sheet3 = ss.insertSheet("data_sensor", 2);
+  }
+  sheet3.clear();
+  var headers3 = [
+    "timestamp",
+    "device_id",
+    "tds_ppm",
+    "soil_moisture_pct",
+    "water_level_state",
+    "pump1_state",
+    "pump2_state",
+    "buzzer_state",
+    "wifi_rssi_dbm",
+    "duckweed_coverage_pct",
+    "snail_eggs_count",
+    "auto_mode"
+  ];
+  sheet3.appendRow(headers3);
+  var headerRange3 = sheet3.getRange(1, 1, 1, headers3.length);
+  headerRange3.setBackground("#1e1b4b"); // Màu tím indigo chuyên dùng cho Analytics
+  headerRange3.setFontColor("#a5b4fc"); // Màu tím sáng nổi bật
+  headerRange3.setFontWeight("bold");
+  headerRange3.setHorizontalAlignment("center");
+  sheet3.setFrozenRows(1);
+
+  // Thêm 1 dòng dữ liệu khởi tạo mẫu chuẩn số
+  sheet3.appendRow([
+    nowStr,
+    "${systemSettings.deviceId}",
+    ${latestSensorData.tds || 450},
+    ${latestSensorData.soil_moisture || 68},
+    ${!latestSensorData.float_low ? 0 : (latestSensorData.float_high ? 2 : 1)},
+    ${latestSensorData.pump1 ? 1 : 0},
+    ${latestSensorData.pump2 ? 1 : 0},
+    ${latestSensorData.buzzer ? 1 : 0},
+    ${latestSensorData.wifi_rssi || -60},
+    ${latestVisionResult.duckweed.coverage ?? 75},
+    ${latestVisionResult.snail_eggs.egg_clusters ?? 5},
+    ${deviceMode === 'MANUAL' ? 0 : 1}
+  ]);
+  sheet3.autoResizeColumns(1, headers3.length);
+
   // Xóa sheet rác mặc định nếu có tên "Trang tính 1" hoặc "Sheet1"
   var defaultSheet = ss.getSheetByName("Trang tính 1") || ss.getSheetByName("Sheet1");
-  if (defaultSheet && ss.getSheets().length > 2) {
+  if (defaultSheet && ss.getSheets().length > 3) {
     ss.deleteSheet(defaultSheet);
   }
 
-  SpreadsheetApp.getUi().alert("✅ Đã khởi tạo thành công 2 Tab: 'DuLieu_NhatKy' và 'CaiDat_HeThong'!");
+  SpreadsheetApp.getUi().alert("✅ Đã khởi tạo thành công 3 Tab: 'DuLieu_NhatKy', 'CaiDat_HeThong' và 'data_sensor' (sẵn sàng vẽ biểu đồ)!");
 }
 
-// BƯỚC 2: Nhận dữ liệu gửi từ Webhook để ghi vào Nhật Ký hoặc cập nhật Cài Đặt
+// Giữ lại alias hàm cũ để người dùng quen tay vẫn chạy bình thường
+function khoiTaoHaiTabEcoFarm() {
+  khoiTaoBaTabEcoFarm();
+}
+
+// BƯỚC 2 (TÙY CHỌN TIỆN ÍCH): Tự động tạo Biểu Đồ Đường (Line Chart) trên Tab data_sensor
+function taoBieuDoDataSensor() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName("data_sensor");
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert("Chưa tìm thấy tab 'data_sensor'. Vui lòng chạy hàm 'khoiTaoBaTabEcoFarm' trước!");
+    return;
+  }
+
+  // Xóa các biểu đồ cũ trên sheet nếu có để không bị trùng lặp
+  var existingCharts = sheet.getCharts();
+  for (var i = 0; i < existingCharts.length; i++) {
+    sheet.removeChart(existingCharts[i]);
+  }
+
+  var lastRow = Math.max(sheet.getLastRow(), 2);
+  // Cột 1: timestamp, Cột 3: tds_ppm, Cột 4: soil_moisture_pct
+  var timeRange = sheet.getRange(1, 1, lastRow, 1);
+  var tdsRange = sheet.getRange(1, 3, lastRow, 1);
+  var moistureRange = sheet.getRange(1, 4, lastRow, 1);
+
+  var chart = sheet.newChart()
+    .setChartType(Charts.ChartType.LINE)
+    .addRange(timeRange)
+    .addRange(tdsRange)
+    .addRange(moistureRange)
+    .setPosition(2, 14, 0, 0) // Vẽ biểu đồ sang cạnh bảng dữ liệu (từ cột N)
+    .setOption('title', 'Biểu Đồ Xu Hướng TDS (ppm) & Độ Ẩm Đất (%) Theo Thời Gian')
+    .setOption('hAxis', { title: 'Thời Gian' })
+    .setOption('vAxes', {
+      0: { title: 'TDS (ppm)' },
+      1: { title: 'Độ Ẩm (%)' }
+    })
+    .setOption('series', {
+      0: { targetAxisIndex: 0, color: '#0284c7', lineWidth: 3 },
+      1: { targetAxisIndex: 1, color: '#16a34a', lineWidth: 3 }
+    })
+    .setOption('width', 820)
+    .setOption('height', 420)
+    .setOption('curveType', 'function')
+    .build();
+
+  sheet.insertChart(chart);
+  SpreadsheetApp.getUi().alert("✅ Đã vẽ thành công Biểu Đồ Thời Gian Thực trên tab 'data_sensor'!");
+}
+
+// Tự động tạo menu điều khiển ngay trên giao diện Google Sheets khi mở tệp
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu("🌿 EcoFarm IoT")
+    .addItem("1. Khởi Tạo 3 Tab Chuẩn", "khoiTaoBaTabEcoFarm")
+    .addItem("2. Tự Động Vẽ Biểu Đồ data_sensor", "taoBieuDoDataSensor")
+    .addToUi();
+}
+
+// BƯỚC 3: Nhận dữ liệu gửi từ Webhook để ghi đồng thời vào Nhật Ký, Cài Đặt và data_sensor
 function doPost(e) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2439,32 +2612,85 @@ function doPost(e) {
     }
 
     var nowStr = Utilities.formatDate(new Date(), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss");
+    var timeFormatted = data.timestamp ? Utilities.formatDate(new Date(data.timestamp), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss") : nowStr;
+    var devId = data.device_id || "${systemSettings.deviceId}";
+    var tdsVal = Number(data.tds || 0);
+    var soilVal = Number(data.soil_moisture || 0);
+    var duckweed = data.duckweed_coverage !== undefined ? Number(data.duckweed_coverage) : 75;
+    var snailEggs = data.snail_eggs_count !== undefined ? Number(data.snail_eggs_count) : 5;
+    var modeStr = data.mode || "AUTO";
 
-    // 1. Ghi nhận dữ liệu cảm biến vào Tab 1: DuLieu_NhatKy
+    // 1. Ghi nhận dữ liệu cảm biến vào Tab 1: DuLieu_NhatKy (Tổng hợp trực quan)
     if (data.action === "log_telemetry" || data.action === "sync_all" || data.tds !== undefined) {
       var sheet1 = ss.getSheetByName("DuLieu_NhatKy");
       if (!sheet1) {
-        khoiTaoHaiTabEcoFarm();
+        khoiTaoBaTabEcoFarm();
         sheet1 = ss.getSheetByName("DuLieu_NhatKy");
       }
+      
+      var rssi = data.wifi_rssi ? (data.wifi_rssi + " dBm") : "-60 dBm";
       sheet1.appendRow([
-        data.timestamp ? Utilities.formatDate(new Date(data.timestamp), "Asia/Ho_Chi_Minh", "dd/MM/yyyy HH:mm:ss") : nowStr,
-        Number(data.tds || 0),
-        Number(data.soil_moisture || 0),
-        data.float_low ? "BÌNH THƯỜNG" : "CẠN NƯỚC (ALARM)",
+        timeFormatted,
+        devId,
+        tdsVal,
+        soilVal,
+        data.float_low ? "ĐỦ NƯỚC" : "CẠN NƯỚC (BÁO ĐỘNG)",
         data.float_high ? "TRÀN BỂ" : "BÌNH THƯỜNG",
         data.pump1 ? "BẬT" : "TẮT",
         data.pump2 ? "BẬT" : "TẮT",
         data.buzzer ? "BẬT" : "TẮT",
-        data.note || "Tự động ghi nhận"
+        rssi,
+        modeStr,
+        duckweed,
+        snailEggs,
+        data.note || "Tự động ghi nhận theo chu kỳ"
+      ]);
+
+      // 2. GHI ĐỒNG THỜI VÀO TAB 3: data_sensor (DỮ LIỆU SỐ CHUẨN HÓA ĐỂ VẼ BIỂU ĐỒ THỜI GIAN)
+      var sheet3 = ss.getSheetByName("data_sensor");
+      if (!sheet3) {
+        sheet3 = ss.insertSheet("data_sensor", 2);
+        sheet3.appendRow([
+          "timestamp", "device_id", "tds_ppm", "soil_moisture_pct",
+          "water_level_state", "pump1_state", "pump2_state", "buzzer_state",
+          "wifi_rssi_dbm", "duckweed_coverage_pct", "snail_eggs_count", "auto_mode"
+        ]);
+        var h3 = sheet3.getRange(1, 1, 1, 12);
+        h3.setBackground("#1e1b4b");
+        h3.setFontColor("#a5b4fc");
+        h3.setFontWeight("bold");
+        h3.setHorizontalAlignment("center");
+        sheet3.setFrozenRows(1);
+      }
+
+      var waterState = !data.float_low ? 0 : (data.float_high ? 2 : 1);
+      var p1 = data.pump1 ? 1 : 0;
+      var p2 = data.pump2 ? 1 : 0;
+      var bz = data.buzzer ? 1 : 0;
+      var rssiNum = typeof data.wifi_rssi === 'number' ? data.wifi_rssi : parseInt(String(data.wifi_rssi || '-60'), 10);
+      var autoModeVal = (modeStr === 'MANUAL' || data.mode === 0) ? 0 : 1;
+
+      sheet3.appendRow([
+        timeFormatted,
+        devId,
+        tdsVal,
+        soilVal,
+        waterState,
+        p1,
+        p2,
+        bz,
+        isNaN(rssiNum) ? -60 : rssiNum,
+        duckweed,
+        snailEggs,
+        autoModeVal
       ]);
     }
 
-    // 2. Cập nhật bảng cài đặt vào Tab 2: CaiDat_HeThong
+    // 3. Cập nhật bảng cài đặt vào Tab 2: CaiDat_HeThong
     if (data.action === "update_settings" || (data.action === "sync_all" && data.settings)) {
       var sheet2 = ss.getSheetByName("CaiDat_HeThong");
       if (!sheet2) {
-        khoiTaoHaiTabEcoFarm();
+        khoiTaoBaTabEcoFarm();
         sheet2 = ss.getSheetByName("CaiDat_HeThong");
       }
       var settingsMap = data.settings || {};
@@ -2481,7 +2707,7 @@ function doPost(e) {
 
     return ContentService.createTextOutput(JSON.stringify({
       success: true,
-      message: "Đã cập nhật dữ liệu thành công lên 2 Tab!",
+      message: "Đã cập nhật dữ liệu thành công lên cả 3 Tab (DuLieu_NhatKy, CaiDat_HeThong, data_sensor)!",
       timestamp: nowStr
     })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
@@ -2529,6 +2755,7 @@ setInterval(async () => {
       body: JSON.stringify({
         action: 'log_telemetry',
         timestamp: syncTimestamp,
+        device_id: systemSettings.deviceId,
         tds: latestSensorData.tds,
         soil_moisture: latestSensorData.soil_moisture,
         float_low: latestSensorData.float_low,
@@ -2536,7 +2763,15 @@ setInterval(async () => {
         pump1: latestSensorData.pump1,
         pump2: latestSensorData.pump2,
         buzzer: latestSensorData.buzzer,
-        note: 'Đồng bộ tự động từ ESP32',
+        wifi_rssi: latestSensorData.wifi_rssi || -60,
+        mode: latestSensorData.mode || deviceMode || 'AUTO',
+        duckweed_coverage: latestVisionResult.duckweed.coverage ?? 75,
+        snail_eggs_count: latestVisionResult.snail_eggs.egg_clusters ?? 5,
+        note: latestSensorData.tds && latestSensorData.tds > systemSettings.tdsMax
+          ? 'TDS Cao'
+          : latestSensorData.soil_moisture && latestSensorData.soil_moisture < systemSettings.soilMoistureMin
+          ? 'Đất Khô'
+          : 'Đồng bộ tự động định kỳ',
       }),
     });
     systemSettings.lastSheetsSyncTime = syncTimestamp;

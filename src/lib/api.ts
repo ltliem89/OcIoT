@@ -235,14 +235,31 @@ export async function fetchHistoryData(range: string = '24h'): Promise<{ filter:
 }
 
 export async function fetchGoogleSheets(url?: string, webhookUrl?: string): Promise<GoogleSheetsData> {
-  const params = new URLSearchParams();
-  if (url) params.append('url', url);
-  if (webhookUrl) params.append('webhookUrl', webhookUrl);
-  const query = params.toString() ? `?${params.toString()}` : '';
-
   try {
-    const res = await fetch(`/api/sheets${query}`);
-    const data = await res.json();
+    // Prefer POST to avoid URL query string truncation or special character encoding issues
+    const res = await fetch('/api/sheets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, webhookUrl }),
+    });
+
+    const text = await res.text();
+    let data: GoogleSheetsData;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Non-JSON response (e.g. 404/502/HTML from proxy)
+      return {
+        connected: false,
+        url: url || '',
+        webhookUrl: webhookUrl || '',
+        spreadsheetId: null,
+        lastUpdate: null,
+        rowsCount: 0,
+        records: [],
+        error: 'Máy chủ phản hồi định dạng không hợp lệ. Vui lòng kiểm tra lại đường link Google Sheets / Drive và bấm Kết Nối Lại.',
+      };
+    }
     return data;
   } catch (err: any) {
     return {
@@ -253,7 +270,7 @@ export async function fetchGoogleSheets(url?: string, webhookUrl?: string): Prom
       lastUpdate: null,
       rowsCount: 0,
       records: [],
-      error: err.message || 'Không thể kết nối đến máy chủ',
+      error: err.message ? `Lỗi kết nối mạng: ${err.message}` : 'Không thể kết nối đến máy chủ backend',
     };
   }
 }
@@ -265,7 +282,15 @@ export async function syncToGoogleSheets(target: 'telemetry' | 'settings' | 'all
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target, webhookUrl }),
     });
-    return await res.json();
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {
+        success: false,
+        message: 'Phản hồi từ máy chủ không hợp lệ khi đồng bộ. Vui lòng kiểm tra lại liên kết Webhook.',
+      };
+    }
   } catch (err: any) {
     return {
       success: false,

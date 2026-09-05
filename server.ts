@@ -1816,181 +1816,353 @@ app.get('/api/iot/history', (req, res) => {
   });
 });
 
-// Google Sheets Status & Data Fetch Endpoint
-app.get('/api/sheets', async (req, res) => {
-  let sheetUrl = (req.query.url as string) || systemSettings.googleSheetsUrl || '';
-  let webhookUrl = (req.query.webhookUrl as string) || systemSettings.googleSheetsWebhookUrl || '';
+// Helper to parse any Google Sheets or Google Drive or Apps Script URL
+function parseGoogleSpreadsheetInput(rawInput: string): {
+  type: 'SHEET' | 'DRIVE_FILE' | 'DRIVE_FOLDER' | 'APPS_SCRIPT_WEBAPP' | 'APPS_SCRIPT_EDITOR' | 'RAW_ID' | 'INVALID';
+  id: string | null;
+  normalizedUrl: string;
+  error?: string;
+} {
+  const input = String(rawInput || '').trim();
+  if (!input) {
+    return { type: 'INVALID', id: null, normalizedUrl: '', error: 'Chưa nhập đường link Google Sheets' };
+  }
 
-  // Auto-detect if user swapped URLs
-  if (sheetUrl.includes('script.google.com/macros/s/')) {
-    webhookUrl = sheetUrl;
-    if (systemSettings.googleSheetsUrl && !systemSettings.googleSheetsUrl.includes('script.google.com')) {
-      sheetUrl = systemSettings.googleSheetsUrl;
+  // 1. Check if user passed an Apps Script Web App URL
+  if (input.includes('script.google.com/macros/s/') && input.includes('/exec')) {
+    return { type: 'APPS_SCRIPT_WEBAPP', id: null, normalizedUrl: input };
+  }
+
+  // 2. Check if user passed an Apps Script Editor link
+  if (input.includes('script.google.com/d/') || (input.includes('script.google.com') && input.includes('/edit'))) {
+    return {
+      type: 'APPS_SCRIPT_EDITOR',
+      id: null,
+      normalizedUrl: input,
+      error: 'Đây là đường link chỉnh sửa mã Apps Script (/edit), không phải bảng tính. Nếu bạn muốn dùng làm Webhook, hãy bấm nút [Triển khai] (Deploy) -> [Triển khai mới] -> Chọn [Ứng dụng web] để lấy link kết thúc bằng /exec.',
+    };
+  }
+
+  // 3. Check Google Drive folder link
+  if (input.includes('drive.google.com/drive/folders/')) {
+    const folderMatch = input.match(/folders\/([a-zA-Z0-9-_]+)/);
+    return {
+      type: 'DRIVE_FOLDER',
+      id: folderMatch ? folderMatch[1] : null,
+      normalizedUrl: input,
+      error: 'Đây là đường link Thư mục Google Drive (Folder), không phải tệp bảng tính Google Sheets. Bạn hãy mở bảng tính bên trong thư mục đó và copy đường link trên thanh địa chỉ của bảng tính.',
+    };
+  }
+
+  // 4. Check standard Google Sheets URL: https://docs.google.com/spreadsheets/d/{ID}/...
+  const sheetMatch = input.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/([a-zA-Z0-9-_]+)/);
+  if (sheetMatch && sheetMatch[1]) {
+    const id = sheetMatch[1];
+    return {
+      type: 'SHEET',
+      id,
+      normalizedUrl: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+    };
+  }
+
+  // 5. Check Google Drive file URL: https://drive.google.com/file/d/{ID}/...
+  const driveFileMatch = input.match(/\/file\/d\/([a-zA-Z0-9-_]+)/);
+  if (driveFileMatch && driveFileMatch[1]) {
+    const id = driveFileMatch[1];
+    return {
+      type: 'DRIVE_FILE',
+      id,
+      normalizedUrl: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+    };
+  }
+
+  // 6. Check Google Drive open URL: https://drive.google.com/open?id={ID}
+  const driveOpenMatch = input.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+  if (driveOpenMatch && driveOpenMatch[1]) {
+    const id = driveOpenMatch[1];
+    return {
+      type: 'DRIVE_FILE',
+      id,
+      normalizedUrl: `https://docs.google.com/spreadsheets/d/${id}/edit`,
+    };
+  }
+
+  // 7. Check raw Spreadsheet ID (typically 30-65 chars)
+  if (/^[a-zA-Z0-9-_]{25,65}$/.test(input)) {
+    return {
+      type: 'RAW_ID',
+      id: input,
+      normalizedUrl: `https://docs.google.com/spreadsheets/d/${input}/edit`,
+    };
+  }
+
+  return {
+    type: 'INVALID',
+    id: null,
+    normalizedUrl: input,
+    error: 'Đường link không đúng định dạng. Vui lòng dán link Google Sheets dạng: https://docs.google.com/spreadsheets/d/.../edit hoặc link chia sẻ Drive dạng: https://drive.google.com/file/d/.../view',
+  };
+}
+
+// Handler logic for Google Sheets check and read
+async function handleGoogleSheetsRequest(reqUrl: string, reqWebhook: string, res: express.Response) {
+  try {
+    let sheetUrl = String(reqUrl || '').trim();
+    let webhookUrl = String(reqWebhook || '').trim();
+
+    // If both empty, check stored settings
+    if (!sheetUrl && !webhookUrl) {
+      sheetUrl = systemSettings.googleSheetsUrl || '';
+      webhookUrl = systemSettings.googleSheetsWebhookUrl || '';
     }
-  }
 
-  if (webhookUrl) {
-    systemSettings.googleSheetsWebhookUrl = webhookUrl;
-  }
-  if (sheetUrl && !sheetUrl.includes('script.google.com')) {
+    // Auto-detect swapped URLs: user pasted Apps Script into Sheet URL box
+    if (sheetUrl.includes('script.google.com/macros/s/')) {
+      if (!webhookUrl) webhookUrl = sheetUrl;
+      sheetUrl = systemSettings.googleSheetsUrl && !systemSettings.googleSheetsUrl.includes('script.google.com')
+        ? systemSettings.googleSheetsUrl
+        : '';
+    }
+
+    // If user pasted Google Sheets link into Webhook box
+    if (webhookUrl.includes('docs.google.com/spreadsheets') || webhookUrl.includes('drive.google.com/file/d')) {
+      if (!sheetUrl) sheetUrl = webhookUrl;
+      webhookUrl = '';
+    }
+
+    // Save valid URLs
+    if (webhookUrl && webhookUrl.includes('script.google.com/macros/s/')) {
+      systemSettings.googleSheetsWebhookUrl = webhookUrl;
+    }
+    if (sheetUrl && !sheetUrl.includes('script.google.com')) {
+      systemSettings.googleSheetsUrl = sheetUrl;
+    }
+    saveStore();
+
+    // Case 1: Both are empty
+    if (!sheetUrl && !webhookUrl) {
+      return res.json({
+        connected: false,
+        url: '',
+        webhookUrl: '',
+        spreadsheetId: null,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: 'Chưa cấu hình URL Google Sheets',
+      });
+    }
+
+    // Parse the Sheet URL
+    const parseResult = parseGoogleSpreadsheetInput(sheetUrl);
+
+    // Case 2: User gave an Apps Script Webhook but no Sheet URL
+    if (webhookUrl && (!sheetUrl || parseResult.type === 'APPS_SCRIPT_WEBAPP')) {
+      return res.json({
+        connected: true,
+        url: sheetUrl || webhookUrl,
+        webhookUrl,
+        spreadsheetId: 'APPS_SCRIPT_WEBHOOK',
+        lastUpdate: new Date().toISOString(),
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: historyData.length,
+        records: historyData.slice(-50),
+        message: 'Đã kết nối thành công với Google Apps Script Web App (Hỗ trợ đẩy và nhận dữ liệu 2 chiều)!',
+      });
+    }
+
+    // If parsing produced a specific error
+    if (parseResult.error && !parseResult.id) {
+      return res.json({
+        connected: false,
+        url: sheetUrl,
+        webhookUrl,
+        spreadsheetId: null,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: parseResult.error,
+      });
+    }
+
+    const spreadsheetId = parseResult.id;
+    if (!spreadsheetId) {
+      return res.json({
+        connected: false,
+        url: sheetUrl,
+        webhookUrl,
+        spreadsheetId: null,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: 'Không trích xuất được ID bảng tính. Vui lòng kiểm tra lại liên kết Google Sheets.',
+      });
+    }
+
+    // Normalize to standard sheets edit URL
+    sheetUrl = parseResult.normalizedUrl;
     systemSettings.googleSheetsUrl = sheetUrl;
-  }
-  saveStore();
+    saveStore();
 
-  if (!sheetUrl && !webhookUrl) {
-    return res.json({
-      connected: false,
-      url: '',
-      webhookUrl: '',
-      spreadsheetId: null,
-      lastUpdate: null,
-      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-      rowsCount: 0,
-      records: [],
-      error: 'Chưa cấu hình URL Google Sheets',
-    });
-  }
+    // Query Google Sheets CSV export
+    const exportCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
+    let rows: string[] = [];
+    let isNewOrEmpty = false;
 
-  // If only webhook URL is present
-  if (webhookUrl && (!sheetUrl || sheetUrl.includes('script.google.com'))) {
-    return res.json({
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 7000);
+
+      const response = await fetch(exportCsvUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/csv,text/plain,*/*',
+        },
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+      clearTimeout(timeoutId);
+
+      const textResult = await response.text();
+
+      // Check if file not found (404 or Google Docs Page not found HTML)
+      if (
+        response.status === 404 ||
+        textResult.includes('Sorry, the file you have requested does not exist') ||
+        textResult.includes('<title>Page not found</title>')
+      ) {
+        return res.json({
+          connected: false,
+          url: sheetUrl,
+          webhookUrl,
+          spreadsheetId,
+          lastUpdate: null,
+          lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+          lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+          lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+          rowsCount: 0,
+          records: [],
+          error: 'Google báo: Tệp không tồn tại hoặc ID không chính xác. Nếu bạn lấy link từ Google Drive, hãy bấm đúp mở tệp bảng tính đó trên trình duyệt rồi copy link từ thanh địa chỉ.',
+        });
+      }
+
+      // Check if Google returned an HTML login page (Sheet is private / requires sign-in)
+      if (
+        textResult.includes('<!DOCTYPE html>') ||
+        textResult.includes('<html') ||
+        textResult.includes('accounts.google.com') ||
+        response.status === 401 ||
+        response.status === 403
+      ) {
+        return res.json({
+          connected: false,
+          url: sheetUrl,
+          webhookUrl,
+          spreadsheetId,
+          lastUpdate: null,
+          lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+          lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+          lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+          rowsCount: 0,
+          records: [],
+          error: 'Bảng tính Google Sheets đang ở chế độ Riêng tư (Private). Bạn cần mở Google Sheet -> Bấm nút [Chia sẻ] (Share) màu xanh ở góc trên bên phải -> Tại mục "Quyền truy cập chung", đổi thành "Bất kỳ ai có đường liên kết" (Anyone with the link) -> Cấp quyền "Người xem" hoặc "Người chỉnh sửa", sau đó bấm Lưu & Kiểm Tra Lại.',
+        });
+      }
+
+      if (!response.ok) {
+        return res.json({
+          connected: false,
+          url: sheetUrl,
+          webhookUrl,
+          spreadsheetId,
+          lastUpdate: null,
+          lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+          lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+          lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+          rowsCount: 0,
+          records: [],
+          error: `Google Sheets phản hồi mã trạng thái HTTP ${response.status}. Vui lòng kiểm tra lại liên kết.`,
+        });
+      }
+
+      rows = textResult.split(/\r?\n/).filter((r) => r.trim().length > 0);
+      if (rows.length <= 1) {
+        isNewOrEmpty = true;
+      }
+    } catch (fetchErr: any) {
+      return res.json({
+        connected: false,
+        url: sheetUrl,
+        webhookUrl,
+        spreadsheetId,
+        lastUpdate: null,
+        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
+        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
+        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
+        rowsCount: 0,
+        records: [],
+        error: fetchErr.name === 'AbortError'
+          ? 'Kết nối Google Sheets quá thời gian chờ (Timeout). Vui lòng kiểm tra kết nối mạng và thử lại.'
+          : `Lỗi kết nối tới Google Sheets: ${fetchErr.message || 'Không thể tải bảng tính'}`,
+      });
+    }
+
+    const sheetsData: GoogleSheetsData = {
       connected: true,
-      url: sheetUrl || webhookUrl,
+      url: sheetUrl,
       webhookUrl,
-      spreadsheetId: 'APPS_SCRIPT_WEBHOOK',
+      spreadsheetId,
       lastUpdate: new Date().toISOString(),
       lastSyncTime: systemSettings.lastSheetsSyncTime || null,
       lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
       lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-      rowsCount: historyData.length,
+      rowsCount: Math.max(0, rows.length - 1),
       records: historyData.slice(-50),
-      message: 'Đã kết nối trực tiếp với Google Apps Script Web App (Hỗ trợ 2 chiều Đọc/Ghi 2 Tab)!',
-    });
-  }
+      isNewOrEmpty,
+      message: isNewOrEmpty
+        ? 'Đã kết nối với Bảng tính mới! Bảng tính đang trống, hãy bấm Đẩy Dữ Liệu hoặc nạp CSV bên dưới để khởi tạo 2 Tab.'
+        : `Đã kết nối thành công, đọc được ${Math.max(0, rows.length - 1)} dòng dữ liệu từ Google Sheets.`,
+    };
 
-  // Extract Spreadsheet ID from Google Sheets URL
-  let spreadsheetId: string | null = null;
-  const match = sheetUrl.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/([a-zA-Z0-9-_]+)/);
-  if (match && match[1]) {
-    spreadsheetId = match[1];
-  } else if (/^[a-zA-Z0-9-_]{30,60}$/.test(sheetUrl.trim())) {
-    spreadsheetId = sheetUrl.trim();
-    sheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
-    systemSettings.googleSheetsUrl = sheetUrl;
-    saveStore();
-  }
-
-  if (!spreadsheetId) {
+    return res.json(sheetsData);
+  } catch (outerErr: any) {
+    console.error('Lỗi xử lý /api/sheets:', outerErr);
     return res.json({
       connected: false,
-      url: sheetUrl,
-      webhookUrl,
+      url: reqUrl || '',
+      webhookUrl: reqWebhook || '',
       spreadsheetId: null,
       lastUpdate: null,
-      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
       rowsCount: 0,
       records: [],
-      error: 'URL Google Sheets không đúng định dạng. Vui lòng dán link dạng: https://docs.google.com/spreadsheets/d/.../edit',
+      error: `Lỗi xử lý yêu cầu: ${outerErr?.message || 'Không rõ nguyên nhân'}`,
     });
   }
+}
 
-  const exportCsvUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv`;
-  let rows: string[] = [];
-  let isNewOrEmpty = false;
+// Google Sheets Status & Data Fetch Endpoint (GET)
+app.get('/api/sheets', async (req, res) => {
+  const reqUrl = Array.isArray(req.query.url) ? String(req.query.url[0]) : String(req.query.url || '');
+  const reqWebhook = Array.isArray(req.query.webhookUrl) ? String(req.query.webhookUrl[0]) : String(req.query.webhookUrl || '');
+  await handleGoogleSheetsRequest(reqUrl, reqWebhook, res);
+});
 
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-    const response = await fetch(exportCsvUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/csv,text/plain,*/*',
-      },
-      signal: controller.signal,
-      redirect: 'follow',
-    });
-    clearTimeout(timeoutId);
-
-    const textResult = await response.text();
-
-    // Check if Google returned an HTML login page (Sheet is private / requires sign-in)
-    if (textResult.includes('<!DOCTYPE html>') || textResult.includes('<html') || textResult.includes('accounts.google.com') || response.status === 401 || response.status === 403) {
-      return res.json({
-        connected: false,
-        url: sheetUrl,
-        webhookUrl,
-        spreadsheetId,
-        lastUpdate: null,
-        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-        rowsCount: 0,
-        records: [],
-        error: 'Bảng tính Google Sheets đang ở chế độ Riêng tư (Private). Bạn cần mở Google Sheet -> Bấm nút [Chia sẻ] (Share) ở góc trên bên phải -> Tại mục "Quyền truy cập chung", đổi thành "Bất kỳ ai có đường liên kết" (Anyone with the link) -> Cấp quyền "Người xem" hoặc "Người chỉnh sửa", sau đó bấm Kết Nối Lại.',
-      });
-    }
-
-    if (!response.ok) {
-      return res.json({
-        connected: false,
-        url: sheetUrl,
-        webhookUrl,
-        spreadsheetId,
-        lastUpdate: null,
-        lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-        lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-        lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-        rowsCount: 0,
-        records: [],
-        error: `Google Sheets phản hồi mã trạng thái HTTP ${response.status}. Vui lòng kiểm tra lại liên kết.`,
-      });
-    }
-
-    rows = textResult.split(/\r?\n/).filter((r) => r.trim().length > 0);
-    if (rows.length <= 1) {
-      isNewOrEmpty = true;
-    }
-  } catch (fetchErr: any) {
-    return res.json({
-      connected: false,
-      url: sheetUrl,
-      webhookUrl,
-      spreadsheetId,
-      lastUpdate: null,
-      lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-      lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-      lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-      rowsCount: 0,
-      records: [],
-      error: fetchErr.name === 'AbortError'
-        ? 'Kết nối Google Sheets quá thời gian chờ (Timeout). Vui lòng thử lại.'
-        : `Lỗi kết nối tới Google Sheets: ${fetchErr.message || 'Không thể tải bảng tính'}`,
-    });
-  }
-
-  const sheetsData: GoogleSheetsData = {
-    connected: true,
-    url: sheetUrl,
-    webhookUrl,
-    spreadsheetId,
-    lastUpdate: new Date().toISOString(),
-    lastSyncTime: systemSettings.lastSheetsSyncTime || null,
-    lastSyncStatus: systemSettings.lastSheetsSyncStatus || 'IDLE',
-    lastSyncMessage: systemSettings.lastSheetsSyncMessage || '',
-    rowsCount: Math.max(0, rows.length - 1),
-    records: historyData.slice(-50),
-    isNewOrEmpty,
-    message: isNewOrEmpty
-      ? 'Đã kết nối với Bảng tính mới! Bảng tính đang trống, hãy bấm Đẩy Dữ Liệu hoặc nạp CSV bên dưới để khởi tạo 2 Tab.'
-      : `Đã kết nối thành công, đọc được ${Math.max(0, rows.length - 1)} dòng dữ liệu từ Google Sheets.`,
-  };
-
-  res.json(sheetsData);
+// Google Sheets Status & Data Fetch Endpoint (POST)
+app.post('/api/sheets', async (req, res) => {
+  const reqUrl = String(req.body?.url || '');
+  const reqWebhook = String(req.body?.webhookUrl || '');
+  await handleGoogleSheetsRequest(reqUrl, reqWebhook, res);
 });
 
 // Save Google Sheets Configuration
@@ -2005,10 +2177,28 @@ app.post('/api/sheets/config', (req, res) => {
 // Real-time Push Data To Google Sheets (Sync Now)
 app.post('/api/sheets/sync-now', async (req, res) => {
   const { target = 'all', webhookUrl } = req.body || {};
-  const activeWebhook = webhookUrl || systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com') ? systemSettings.googleSheetsUrl : null);
+  let activeWebhook = String(webhookUrl || systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com/macros/s/') ? systemSettings.googleSheetsUrl : '')).trim();
 
-  if (webhookUrl) {
-    systemSettings.googleSheetsWebhookUrl = webhookUrl;
+  if (activeWebhook) {
+    // Check if user accidentally pasted Apps Script editor link (/edit)
+    if (activeWebhook.includes('script.google.com/d/') || (activeWebhook.includes('script.google.com') && activeWebhook.includes('/edit'))) {
+      return res.json({
+        success: false,
+        needWebhook: true,
+        message: 'Đường link Webhook bạn dán là link chỉnh sửa mã Apps Script (/edit), không phải Web App đã triển khai. Bạn cần vào Apps Script -> bấm nút [Triển khai] (Deploy) ở góc trên bên phải -> chọn [Tùy chọn triển khai mới] (New deployment) -> chọn loại [Ứng dụng web] (Web app) -> Ai có quyền truy cập chọn [Bất kỳ ai] (Anyone) -> Bấm Triển khai và copy đường link kết thúc bằng "/exec".',
+      });
+    }
+
+    // Check if user pasted a regular Google Sheet link into Webhook box
+    if (activeWebhook.includes('docs.google.com/spreadsheets') || activeWebhook.includes('drive.google.com')) {
+      return res.json({
+        success: false,
+        needWebhook: true,
+        message: 'Đường link bạn dán vào ô Webhook là link Google Sheets/Drive, không phải link Google Apps Script Web App. Vui lòng làm theo hướng dẫn ở Tab "Mã Apps Script Tự Động" bên dưới để lấy link Webhook.',
+      });
+    }
+
+    systemSettings.googleSheetsWebhookUrl = activeWebhook;
     saveStore();
   }
 

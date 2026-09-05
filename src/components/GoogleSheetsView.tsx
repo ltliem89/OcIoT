@@ -335,7 +335,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
             {/* Input 1: Google Sheet URL */}
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
-                <span>1. Đường Link Google Sheet (Để Mở &amp; Đọc Dữ Liệu)</span>
+                <span>1. Đường Link Google Sheet hoặc Drive (Để Mở &amp; Đọc Dữ Liệu)</span>
                 <span className="text-[10px] text-slate-400 font-normal">Bắt buộc</span>
               </label>
               <div className="relative">
@@ -344,10 +344,42 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                   type="text"
                   value={sheetUrlInput}
                   onChange={(e) => setSheetUrlInput(e.target.value)}
-                  placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                  placeholder="https://docs.google.com/spreadsheets/d/.../edit hoặc link Drive"
                   className="w-full bg-white border border-slate-200 rounded-xl pl-10 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 font-mono transition-all"
                 />
               </div>
+
+              {/* Dynamic feedback under Box 1 */}
+              {sheetUrlInput.includes('drive.google.com/file/d/') && (
+                <p className="text-[11px] text-emerald-700 font-medium flex items-center gap-1 bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-200">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>Đã nhận diện link Google Drive! Hệ thống sẽ tự động trích xuất mã tệp sang Google Sheets.</span>
+                </p>
+              )}
+              {sheetUrlInput.includes('drive.google.com/drive/folders/') && (
+                <p className="text-[11px] text-amber-800 font-medium flex items-center gap-1 bg-amber-50 px-2.5 py-1 rounded-lg border border-amber-200">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>Đây là link Thư mục Drive (Folder). Vui lòng mở tệp bảng tính bên trong và copy link của bảng tính đó.</span>
+                </p>
+              )}
+              {sheetUrlInput.includes('script.google.com/macros/s/') && (
+                <div className="flex items-center justify-between text-[11px] text-blue-800 bg-blue-50 px-2.5 py-1.5 rounded-lg border border-blue-200">
+                  <span className="flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span>Bạn đang dán link Webhook Apps Script vào ô Sheet.</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWebhookUrlInput(sheetUrlInput);
+                      setSheetUrlInput('');
+                    }}
+                    className="font-bold underline text-blue-700 hover:text-blue-900 cursor-pointer ml-2"
+                  >
+                    Chuyển sang ô số 2
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Input 2: Google Apps Script Webhook URL */}
@@ -366,23 +398,70 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
                   className="w-full bg-white border border-slate-200 rounded-xl pl-10 pr-3 py-2 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 font-mono transition-all"
                 />
               </div>
+
+              {/* Dynamic feedback under Box 2 */}
+              {(webhookUrlInput.includes('script.google.com/d/') || (webhookUrlInput.includes('script.google.com') && webhookUrlInput.includes('/edit'))) && (
+                <div className="text-[11px] text-amber-900 bg-amber-50 p-2 rounded-lg border border-amber-200 space-y-1">
+                  <p className="font-bold flex items-center gap-1 text-amber-900">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span>Lưu ý: Đây là link soạn thảo mã Apps Script (/edit), không phải Web App!</span>
+                  </p>
+                  <p className="text-amber-800 leading-normal">
+                    Để có link Webhook: Vào Apps Script -&gt; Bấm nút xanh <b>Triển khai (Deploy)</b> ở góc trên bên phải -&gt; Chọn <b>Tùy chọn triển khai mới</b> -&gt; Loại: <b>Ứng dụng web (Web app)</b> -&gt; Quyền truy cập: <b>Bất kỳ ai (Anyone)</b> -&gt; Bấm Triển khai và copy link đuôi <code>/exec</code>.
+                  </p>
+                </div>
+              )}
+              {(webhookUrlInput.includes('docs.google.com/spreadsheets') || webhookUrlInput.includes('drive.google.com')) && (
+                <div className="flex items-center justify-between text-[11px] text-blue-800 bg-blue-50 px-2.5 py-1.5 rounded-lg border border-blue-200">
+                  <span className="flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span>Bạn đang dán link Google Sheets/Drive vào ô Webhook.</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSheetUrlInput(webhookUrlInput);
+                      setWebhookUrlInput('');
+                    }}
+                    className="font-bold underline text-blue-700 hover:text-blue-900 cursor-pointer ml-2"
+                  >
+                    Chuyển sang ô số 1
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
             <div className="text-[11px] text-slate-500 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-              <span>Dữ liệu truyền tải mã hóa bảo mật, an toàn trên tài khoản Google cá nhân của bạn.</span>
+              <span>Hỗ trợ cả link Google Sheets thông thường lẫn link chia sẻ từ Google Drive.</span>
             </div>
 
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer flex items-center gap-2 whitespace-nowrap"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-              <span>LƯU &amp; KIỂM TRA KẾT NỐI</span>
-            </button>
+            <div className="flex items-center gap-2">
+              {sheetUrlInput && webhookUrlInput && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const temp = sheetUrlInput;
+                    setSheetUrlInput(webhookUrlInput);
+                    setWebhookUrlInput(temp);
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl border border-slate-200 transition-colors cursor-pointer"
+                  title="Đổi chỗ 2 đường link nếu bạn lỡ dán ngược"
+                >
+                  Đổi chỗ 2 ô
+                </button>
+              )}
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-sm transition-all active:scale-95 disabled:opacity-50 cursor-pointer flex items-center gap-2 whitespace-nowrap"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+                <span>LƯU &amp; KIỂM TRA KẾT NỐI</span>
+              </button>
+            </div>
           </div>
         </form>
 

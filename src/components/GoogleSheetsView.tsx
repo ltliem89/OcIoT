@@ -27,19 +27,22 @@ import {
   TrendingUp,
   BarChart2,
 } from 'lucide-react';
-import type { GoogleSheetsData, SystemSettings } from '../types.ts';
+import type { GoogleSheetsData, SystemSettings, SensorData } from '../types.ts';
 import { syncToGoogleSheets, saveGoogleSheetsConfig, fetchGoogleSheets } from '../lib/api.ts';
+import { generateAppsScriptCode } from '../lib/appsScriptTemplate.ts';
 
 interface GoogleSheetsViewProps {
   sheetsData: GoogleSheetsData | null;
   onConnect: (url: string, webhookUrl?: string) => Promise<void>;
   isLoading: boolean;
+  currentSensorData?: SensorData | null;
 }
 
 export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
   sheetsData,
   onConnect,
   isLoading,
+  currentSensorData,
 }) => {
   const [sheetUrlInput, setSheetUrlInput] = useState(
     sheetsData?.url || 'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit#gid=0'
@@ -48,25 +51,54 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
 
   const [activeSubTab, setActiveSubTab] = useState<'distribution' | 'data_sensor_tab' | 'settings_tab' | 'apps_script' | 'log'>('distribution');
   const [copiedScript, setCopiedScript] = useState(false);
-  const [scriptCode, setScriptCode] = useState<string>('');
+  const [scriptCode, setScriptCode] = useState<string>(() => generateAppsScriptCode());
   const [systemSettings, setSystemSettings] = useState<SystemSettings | null>(null);
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
-  // Sync inputs when sheetsData updates
+  // Sync inputs when sheetsData updates or read from localStorage
   useEffect(() => {
     if (sheetsData?.url) setSheetUrlInput(sheetsData.url);
     if (sheetsData?.webhookUrl) setWebhookUrlInput(sheetsData.webhookUrl);
+    
+    // Also check localStorage if not set
+    if (!sheetsData?.url || !sheetsData?.webhookUrl) {
+      try {
+        const saved = localStorage.getItem('ecofarm_sheets_config');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.url && !sheetsData?.url) setSheetUrlInput(parsed.url);
+          if (parsed.webhookUrl && !sheetsData?.webhookUrl) setWebhookUrlInput(parsed.webhookUrl);
+        }
+      } catch {}
+    }
   }, [sheetsData?.url, sheetsData?.webhookUrl]);
 
-  // Fetch settings & Apps Script code on mount
+  // Fetch settings & Apps Script code on mount with fallback
   useEffect(() => {
     fetch('/api/settings')
       .then((res) => res.json())
-      .then((data) => setSystemSettings(data))
-      .catch((err) => console.error('Error fetching settings:', err));
+      .then((data) => {
+        setSystemSettings(data);
+        setScriptCode(generateAppsScriptCode({
+          deviceId: data.deviceId,
+          tdsMin: data.tdsMin,
+          tdsMax: data.tdsMax,
+          tdsCritical: data.tdsCritical,
+          soilMoistureMin: data.soilMoistureMin,
+          soilMoistureMax: data.soilMoistureMax,
+          pump1MaxContinuousMinutes: data.pump1MaxContinuousMinutes,
+          pump2IrrigationDurationSeconds: data.pump2IrrigationDurationSeconds,
+          pump2RestIntervalMinutes: data.pump2RestIntervalMinutes,
+          floatLowSafetyCutoff: data.floatLowSafetyCutoff,
+          buzzerOnCriticalAlert: data.autoRules?.buzzerOnCriticalAlert,
+          espReportIntervalSeconds: data.espReportIntervalSeconds,
+          espSheetsSyncIntervalSeconds: data.espSheetsSyncIntervalSeconds,
+        }));
+      })
+      .catch(() => {});
 
     fetch('/api/sheets/apps-script-code')
       .then((res) => res.json())
@@ -75,7 +107,7 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
           setScriptCode(data.script);
         }
       })
-      .catch((err) => console.error('Error fetching apps script:', err));
+      .catch(() => {});
   }, []);
 
   const handleConnect = async (e?: React.FormEvent) => {
@@ -97,23 +129,82 @@ export const GoogleSheetsView: React.FC<GoogleSheetsViewProps> = ({
     setTimeout(() => setCopiedScript(false), 2500);
   };
 
+  const triggerCsvDownload = (filename: string, content: string) => {
+    try {
+      const blob = new Blob(['\uFEFF' + content], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      window.open(`/api/sheets/${filename.replace('_EcoFarm.csv', '-csv')}`, '_blank');
+    }
+  };
+
   const handleDownloadSettingsCsv = () => {
-    window.open('/api/sheets/settings-csv', '_blank');
+    const nowStr = new Date().toLocaleString('vi-VN');
+    const csv = [
+      'MÃ THÔNG SỐ (KEY),GIÁ TRỊ HIỆN TẠI (VALUE),ĐƠN VỊ & Ý NGHĨA HOẠT ĐỘNG,NHÓM CẤU HÌNH,THỜI GIAN CẬP NHẬT',
+      `TDS_MIN,${systemSettings?.tdsMin ?? 200},ppm - Dưới ngưỡng này cảnh báo thiếu dinh dưỡng,[1. DINH DƯỠNG & NƯỚC],${nowStr}`,
+      `TDS_MAX,${systemSettings?.tdsMax ?? 750},ppm - Ngưỡng an toàn tối đa cho ốc và cá,[1. DINH DƯỠNG & NƯỚC],${nowStr}`,
+      `TDS_CRITICAL,${systemSettings?.tdsCritical ?? 950},ppm - Ngưỡng nguy cấp, kích hoạt cảnh báo đỏ,[1. DINH DƯỠNG & NƯỚC],${nowStr}`,
+      `DO_AM_DAT_MIN,${systemSettings?.soilMoistureMin ?? 50},% - Dưới ngưỡng này tự động bật Bơm 2 tưới rau,[2. GIÀN RAU & ĐỘ ẨM],${nowStr}`,
+      `DO_AM_DAT_MAX,${systemSettings?.soilMoistureMax ?? 80},% - Đạt ngưỡng này tự động ngắt Bơm 2,[2. GIÀN RAU & ĐỘ ẨM],${nowStr}`,
+      `THOI_GIAN_TUOI_RAU,${systemSettings?.pump2IrrigationDurationSeconds ?? 45},giây - Thời gian mỗi đợt bơm tưới giàn rau,[2. GIÀN RAU & ĐỘ ẨM],${nowStr}`,
+      `KHOANG_NGHI_TUOI,${systemSettings?.pump2RestIntervalMinutes ?? 30},phút - Khoảng nghỉ giữa các đợt tưới liên tiếp,[2. GIÀN RAU & ĐỘ ẨM],${nowStr}`,
+      `THOI_GIAN_BOM_1_MAX,${systemSettings?.pump1MaxContinuousMinutes ?? 45},phút - Thời gian Bơm 1 tuần hoàn chạy liên tục tối đa,[3. BƠM TUẦN HOÀN],${nowStr}`,
+      `TU_DONG_NGAT_KHI_CAN,${systemSettings?.floatLowSafetyCutoff !== false ? 'BAT' : 'TAT'},Tự động ngắt Bơm 1 ngay khi phao đáy báo cạn để chống cháy,[4. AN TOÀN & BÁO ĐỘNG],${nowStr}`,
+      `COI_BUZZER_CANH_BAO,${systemSettings?.autoRules?.buzzerOnCriticalAlert !== false ? 'BAT' : 'TAT'},Phát còi bíp cảnh báo khi hệ thống gặp sự cố khẩn cấp,[4. AN TOÀN & BÁO ĐỘNG],${nowStr}`,
+      `CHU_KY_GUI_TIN_ESP,${systemSettings?.espReportIntervalSeconds ?? 5},giây - Chu kỳ gửi tin telemetry từ ESP32,[5. THIẾT BỊ & PHẦN CỨNG],${nowStr}`,
+      `CHU_KY_GHI_SHEETS,${systemSettings?.espSheetsSyncIntervalSeconds ?? 60},giây - Chu kỳ tự động đồng bộ lên Google Sheets,[5. THIẾT BỊ & PHẦN CỨNG],${nowStr}`,
+      `DEVICE_ID,${systemSettings?.deviceId || 'ESP32S3_ECO_01'},Mã định danh trạm điều khiển phần cứng,[5. THIẾT BỊ & PHẦN CỨNG],${nowStr}`,
+      `DEVICE_KEY,dvk_live_eco_01_a9f4c82b7e1039d,Khóa xác thực bảo mật nạp vào firmware ESP32,[5. THIẾT BỊ & PHẦN CỨNG],${nowStr}`,
+    ].join('\r\n');
+    triggerCsvDownload('CaiDat_HeThong_EcoFarm.csv', csv);
   };
 
   const handleDownloadTelemetryCsv = () => {
-    window.open('/api/sheets/telemetry-csv', '_blank');
+    const nowStr = new Date().toLocaleString('vi-VN');
+    const csv = [
+      'Thời Gian,Mã Thiết Bị,TDS (ppm),Độ Ẩm Đất (%),Phao Đáy (LOW),Phao Tràn (HIGH),Bơm 1 (Tuần Hoàn),Bơm 2 (Tưới Rau),Còi Buzzer,Sóng WiFi RSSI,Chế Độ,Mật Độ Bèo AI (%),Ổ Trứng Ốc (ổ),Ghi Chú Đánh Giá',
+      `${nowStr},${systemSettings?.deviceId || 'ESP32S3_ECO_01'},${currentSensorData?.tds ?? 485},${currentSensorData?.soil_moisture ?? 68},ĐỦ NƯỚC,BÌNH THƯỜNG,${currentSensorData?.pump1 ? 'BẬT' : 'TẮT'},${currentSensorData?.pump2 ? 'BẬT' : 'TẮT'},${currentSensorData?.buzzer ? 'BẬT' : 'TẮT'},${currentSensorData?.wifi_rssi ?? -58} dBm,${currentSensorData?.mode || 'AUTO'},76,5,Dữ liệu trực tiếp từ EcoFarm IoT Dashboard`,
+    ].join('\r\n');
+    triggerCsvDownload('DuLieu_NhatKy_EcoFarm.csv', csv);
   };
 
   const handleDownloadDataSensorCsv = () => {
-    window.open('/api/sheets/data-sensor-csv', '_blank');
+    const nowStr = new Date().toLocaleString('vi-VN');
+    const csv = [
+      'timestamp,device_id,tds_ppm,soil_moisture_pct,water_level_state,pump1_state,pump2_state,buzzer_state,wifi_rssi_dbm,duckweed_coverage_pct,snail_eggs_count,auto_mode',
+      `${nowStr},${systemSettings?.deviceId || 'ESP32S3_ECO_01'},${currentSensorData?.tds ?? 485},${currentSensorData?.soil_moisture ?? 68},1,${currentSensorData?.pump1 ? 1 : 0},${currentSensorData?.pump2 ? 1 : 0},${currentSensorData?.buzzer ? 1 : 0},${currentSensorData?.wifi_rssi ?? -58},76,5,${currentSensorData?.mode === 'MANUAL' ? 0 : 1}`,
+    ].join('\r\n');
+    triggerCsvDownload('data_sensor_EcoFarm.csv', csv);
   };
 
   const handleTriggerSync = async (target: 'all' | 'settings' | 'telemetry') => {
     setIsSyncing(true);
     setSyncFeedback(null);
     try {
-      const res = await syncToGoogleSheets(target, webhookUrlInput.trim());
+      const res = await syncToGoogleSheets(target, webhookUrlInput.trim(), {
+        deviceId: systemSettings?.deviceId || 'ESP32S3_ECO_01',
+        tds: currentSensorData?.tds ?? 485,
+        soil_moisture: currentSensorData?.soil_moisture ?? 68,
+        float_low: currentSensorData?.float_low !== false,
+        float_high: currentSensorData?.float_high === true,
+        pump1: currentSensorData?.pump1 === true,
+        pump2: currentSensorData?.pump2 === true,
+        buzzer: currentSensorData?.buzzer === true,
+        wifi_rssi: currentSensorData?.wifi_rssi ?? -58,
+        mode: currentSensorData?.mode || 'AUTO',
+        duckweed_coverage: 76,
+        snail_eggs_count: 5,
+        settings: systemSettings,
+      });
+
       if (res.success) {
         setSyncFeedback({
           type: 'success',

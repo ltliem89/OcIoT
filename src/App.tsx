@@ -519,6 +519,7 @@ export default function App() {
                   setSheetsData(data);
                 }}
                 isLoading={isRefreshing}
+                currentSensorData={sensorData}
               />
             )}
 

@@ -1,0 +1,6 @@
+{
+  "name": "OC IoT",
+  "description": "OC IoT - Hệ thống Web Dashboard giám sát và điều khiển hệ sinh thái tuần hoàn kết nối ESP32-S3, AI Vision PC và Google Sheets.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -765,6 +765,23 @@ app.get('/api/v1/devices/:id/firmware-sketch', (req, res) => {
   const telemetryIntervalSec = Math.max(2, Math.min(300, Number(req.query.telemetryInterval) || 5));
   const heartbeatIntervalSec = Math.max(10, Math.min(600, Number(req.query.heartbeatInterval) || 30));
 
+  // Smart sensor & relay tuning options
+  const tdsMin = Math.max(0, Number(req.query.tdsMin) || 200);
+  const tdsMax = Math.max(tdsMin + 50, Number(req.query.tdsMax) || 750);
+  const tdsCritical = Math.max(tdsMax + 50, Number(req.query.tdsCritical) || 950);
+  const tdsRelayAction = (req.query.tdsRelayAction as string) || 'pump1'; // 'pump1' | 'pump2' | 'buzzer' | 'none'
+  const tdsCalibrationK = Number(req.query.tdsCalibrationK) || 1.0;
+
+  const waterFloatLowAction = (req.query.waterFloatLowAction as string) || 'cut_pump1_and_buzzer'; // 'cut_pump1_and_buzzer' | 'cut_pump1' | 'start_refill_pump2' | 'buzzer_only'
+  const waterFloatHighAction = (req.query.waterFloatHighAction as string) || 'alert_and_cut_inflow'; // 'alert_and_cut_inflow' | 'start_drain_pump2' | 'buzzer_only' | 'none'
+
+  const soilMoistureMin = Math.max(10, Math.min(95, Number(req.query.soilMoistureMin) || 50));
+  const soilMoistureMax = Math.max(soilMoistureMin + 5, Math.min(100, Number(req.query.soilMoistureMax) || 80));
+  const soilRelayAction = (req.query.soilRelayAction as string) || 'pump2'; // 'pump2' | 'pump1' | 'buzzer' | 'none'
+  const soilIrrigationSec = Math.max(5, Math.min(600, Number(req.query.soilIrrigationSec) || 45));
+  const soilRawAir = Number(req.query.soilRawAir) || 3000;
+  const soilRawWater = Number(req.query.soilRawWater) || 1200;
+
   // Retrieve actual active Device Key
   const activeKey =
     devicePlainKeys[deviceId] ||
@@ -913,6 +930,30 @@ const char* DEVICE_KEY        = "${activeKey}";
 #define RELAY_OFF_LEVEL    (${relayTrigger} == LOW ? HIGH : LOW)
 
 // ====================================================================================================
+// >>> [CHỖ CHỈNH 5/6]: HIỆU CHỈNH THÔNG MINH MỨC CHUẨN CẢM BIẾN & KÍCH HOẠT RELAY <<<
+// ====================================================================================================
+// 1. CẢM BIẾN TDS (CHẤT LƯỢNG NƯỚC HỒ ỐC & CÁ):
+const float TDS_STANDARD_MIN       = ${tdsMin}.0;      // Mức TDS chuẩn tối thiểu (ppm)
+const float TDS_STANDARD_MAX       = ${tdsMax}.0;      // Mức TDS chuẩn tối đa (ppm)
+const float TDS_CRITICAL_ALERT     = ${tdsCritical}.0; // Ngưỡng TDS nguy cấp cảnh báo (ppm)
+const char* TDS_RELAY_TARGET       = "${tdsRelayAction}"; // "pump1" (Lọc tuần hoàn), "pump2", "buzzer", hoặc "none"
+float tdsCalibrationK              = ${tdsCalibrationK}; // Hệ số cân chỉnh kFactor (mặc định 1.0)
+
+// 2. HAI CẢM BIẾN MỰC NƯỚC (PHAO ĐÁY VÀ PHAO ĐỈNH):
+// - Mực nước 1 (Phao Đáy PIN ${pinoutConfig.pinFloatLow} - chống cạn hồ):
+const char* FLOAT_LOW_SAFETY_RULE  = "${waterFloatLowAction}"; // "cut_pump1_and_buzzer", "cut_pump1", "start_refill_pump2", "buzzer_only"
+// - Mực nước 2 (Phao Đỉnh PIN ${pinoutConfig.pinFloatHigh} - chống tràn hồ):
+const char* FLOAT_HIGH_ALERT_RULE  = "${waterFloatHighAction}"; // "alert_and_cut_inflow", "start_drain_pump2", "buzzer_only", "none"
+
+// 3. CẢM BIẾN ĐỘ ẨM ĐẤT (THẢM THỰC VẬT / RAU THỦY SINH):
+const int SOIL_MOISTURE_MIN        = ${soilMoistureMin};  // Ngưỡng độ ẩm kích hoạt tưới (%)
+const int SOIL_MOISTURE_MAX        = ${soilMoistureMax};  // Ngưỡng độ ẩm chuẩn ngắt tưới (%)
+const char* SOIL_RELAY_TARGET      = "${soilRelayAction}"; // "pump2" (Bơm tưới rau), "pump1", "buzzer", "none"
+const unsigned long SOIL_PUMP_TIME_MS = ${soilIrrigationSec * 1000}; // Thời gian chạy bơm tưới: ${soilIrrigationSec} giây
+const int SOIL_RAW_AIR             = ${soilRawAir}; // Giá trị ADC khi khô ngoài không khí
+const int SOIL_RAW_WATER           = ${soilRawWater}; // Giá trị ADC khi ngập nước
+
+// ====================================================================================================
 // >>> [CHỖ CHỈNH 6/6]: CHU KỲ GỬI TIN BÁO CÁO <<<
 // ====================================================================================================
 const unsigned long TELEMETRY_INTERVAL_MS = ${telemetryIntervalSec * 1000}; // Mặc định: ${telemetryIntervalSec} giây
@@ -987,6 +1028,8 @@ int sendJsonRequest(const String &url, const String &method, const String &paylo
 // ====================================================================================================
 // >>> [CHỖ CHỈNH 5/6]: CÂN CHỈNH CẢM BIẾN TDS VÀ ĐỘ ẨM ĐẤT <<<
 // ====================================================================================================
+// ĐỌC CẢM BIẾN & HIỆU CHUẨN ĐO LƯỜNG THỰC ĐỊA
+// ====================================================================================================
 float readTDS() {
   long sum = 0;
   for (int i = 0; i < 10; i++) {
@@ -996,9 +1039,8 @@ float readTDS() {
   float raw = sum / 10.0;
   float voltage = (raw / 4095.0) * 3.3; // ADC 12-bit ESP32
   
-  // Công thức chuyển đổi Điện áp (V) sang TDS (ppm):
-  // Có thể nhân thêm hệ số cân chỉnh kFactor nếu so với bút đo TDS thực tế
-  float kFactor = 1.0; 
+  // Công thức chuyển đổi Điện áp (V) sang TDS (ppm) kết hợp hệ số cân chỉnh tdsCalibrationK
+  float kFactor = tdsCalibrationK; 
   float tdsValue = (133.42 * pow(voltage, 3) - 255.86 * pow(voltage, 2) + 857.39 * voltage) * 0.5 * kFactor;
   if (tdsValue < 0) tdsValue = 0;
   return tdsValue;
@@ -1012,34 +1054,129 @@ int readSoilMoisture() {
   }
   int raw = sum / 8;
   
-  // Hiệu chuẩn cảm biến điện dung:
-  // Giá trị khi ở không khí khô ráo (Air): ~3000
-  // Giá trị khi ngâm vào cốc nước (Water): ~1200
-  const int RAW_AIR = 3000;
-  const int RAW_WATER = 1200;
+  // Hiệu chuẩn cảm biến điện dung theo thông số cấu hình:
+  // SOIL_RAW_AIR (khô ngoài không khí), SOIL_RAW_WATER (ngâm vào nước)
+  const int RAW_AIR = SOIL_RAW_AIR;
+  const int RAW_WATER = SOIL_RAW_WATER;
   int percent = map(raw, RAW_AIR, RAW_WATER, 0, 100);
   return constrain(percent, 0, 100);
 }
 
 bool readFloatLow() {
-  // Phao đóng tiếp điểm nối chân GPIO xuống GND khi có nước (LOW = Đủ nước an toàn, HIGH = Cạn nước)
+  // Phao 1 - Phao Đáy (chống cạn): LOW = Đủ nước an toàn, HIGH = Cạn nước dưới mức an toàn
   return digitalRead(PIN_FLOAT_LOW) == LOW;
 }
 
 bool readFloatHigh() {
+  // Phao 2 - Phao Đỉnh (chống tràn): LOW = Nước bình thường, HIGH = Nước chạm đỉnh ngập tràn
   return digitalRead(PIN_FLOAT_HIGH) == LOW;
 }
 
 // ====================================================================================================
-// BẢO VỆ PHẦN CỨNG TỰ TRỊ (CHỐNG CHÁY MÁY BƠM KHI HẾT NƯỚC)
+// BẢO VỆ & ĐIỀU KHIỂN TỰ TRỊ THÔNG MINH TẠI CHỖ (CHẠY TRỰC TIẾP TRÊN ESP32 KHÔNG CẦN INTERNET)
 // ====================================================================================================
-void evaluateLocalSafety(bool waterLowSafe) {
-  // BẢO VỆ TỐI CAO: Dù có mạng hay mất mạng hoàn toàn, nếu hụt nước đáy bể,
-  // lập tức ngắt Bơm 1 để bảo vệ chống cháy máy bơm!
-  if (!waterLowSafe && statePump1) {
-    statePump1 = false;
-    digitalWrite(PIN_RELAY_PUMP1, RELAY_OFF_LEVEL);
-    Serial.println("[AN TOAN CUC BO] Can nuoc duoi muc an toan! Tu dong ngat Bom 1!");
+unsigned long lastSoilPumpStartMs = 0;
+bool isSoilIrrigating = false;
+
+void evaluateAutonomousSmartRules(float tds, int moisture, bool waterLowSafe, bool waterHigh) {
+  // --- QUY TẮC 1: CẢM BIẾN MỰC NƯỚC 1 (PHAO ĐÁY / CHỐNG CẠN HỒ) ---
+  if (!waterLowSafe) { // Cạn nước dưới phao đáy
+    if (strcmp(FLOAT_LOW_SAFETY_RULE, "cut_pump1_and_buzzer") == 0 || strcmp(FLOAT_LOW_SAFETY_RULE, "cut_pump1") == 0) {
+      if (statePump1) {
+        statePump1 = false;
+        digitalWrite(PIN_RELAY_PUMP1, RELAY_OFF_LEVEL);
+        Serial.println("[TỰ TRỊ AN TOÀN] Cạn nước phao đáy! Đã tự động NGẮT Bơm 1 chống cháy!");
+      }
+    }
+    if (strcmp(FLOAT_LOW_SAFETY_RULE, "cut_pump1_and_buzzer") == 0 || strcmp(FLOAT_LOW_SAFETY_RULE, "buzzer_only") == 0) {
+      stateBuzzer = true;
+      digitalWrite(PIN_BUZZER, HIGH);
+    }
+    if (strcmp(FLOAT_LOW_SAFETY_RULE, "start_refill_pump2") == 0) {
+      if (!statePump2) {
+        statePump2 = true;
+        digitalWrite(PIN_RELAY_PUMP2, RELAY_ON_LEVEL);
+        Serial.println("[TỰ TRỊ BÙ NƯỚC] Cạn nước phao đáy! Tự động BẬT Relay 2 bơm cấp bù nước!");
+      }
+    }
+  } else {
+    // Nếu mức nước an toàn và không có sự cố khác, tắt còi cạn nước
+    if (!waterHigh && tds <= TDS_CRITICAL_ALERT) {
+      if (stateBuzzer) {
+        stateBuzzer = false;
+        digitalWrite(PIN_BUZZER, LOW);
+      }
+    }
+  }
+
+  // --- QUY TẮC 2: CẢM BIẾN MỰC NƯỚC 2 (PHAO ĐỈNH / CHỐNG TRÀN HỒ) ---
+  if (waterHigh) { // Nước dâng ngập phao đỉnh
+    if (strcmp(FLOAT_HIGH_ALERT_RULE, "alert_and_cut_inflow") == 0) {
+      if (statePump2) {
+        statePump2 = false;
+        digitalWrite(PIN_RELAY_PUMP2, RELAY_OFF_LEVEL);
+        Serial.println("[TỰ TRỊ CHỐNG TRÀN] Nước chạm phao đỉnh! Tự động NGẮT Bơm cấp nước!");
+      }
+      stateBuzzer = true;
+      digitalWrite(PIN_BUZZER, HIGH);
+    } else if (strcmp(FLOAT_HIGH_ALERT_RULE, "start_drain_pump2") == 0) {
+      if (!statePump2) {
+        statePump2 = true;
+        digitalWrite(PIN_RELAY_PUMP2, RELAY_ON_LEVEL);
+        Serial.println("[TỰ TRỊ XẢ TRÀN] Nước chạm phao đỉnh! Tự động BẬT Relay 2 xả tràn!");
+      }
+    } else if (strcmp(FLOAT_HIGH_ALERT_RULE, "buzzer_only") == 0) {
+      stateBuzzer = true;
+      digitalWrite(PIN_BUZZER, HIGH);
+    }
+  }
+
+  // --- QUY TẮC 3: CẢM BIẾN TDS (CHẤT LƯỢNG NƯỚC HỒ ỐC / CÁ) ---
+  if (tds > TDS_STANDARD_MAX) {
+    if (strcmp(TDS_RELAY_TARGET, "pump1") == 0 && waterLowSafe) {
+      if (!statePump1) {
+        statePump1 = true;
+        digitalWrite(PIN_RELAY_PUMP1, RELAY_ON_LEVEL);
+        Serial.printf("[TỰ TRỊ TDS] TDS vượt mức chuẩn (%.0f > %.0f ppm)! Tự động BẬT Bơm 1 lọc tuần hoàn\\n", tds, TDS_STANDARD_MAX);
+      }
+    } else if (strcmp(TDS_RELAY_TARGET, "pump2") == 0) {
+      if (!statePump2) {
+        statePump2 = true;
+        digitalWrite(PIN_RELAY_PUMP2, RELAY_ON_LEVEL);
+        Serial.printf("[TỰ TRỊ TDS] TDS vượt mức chuẩn (%.0f > %.0f ppm)! Tự động BẬT Relay 2\\n", tds, TDS_STANDARD_MAX);
+      }
+    } else if (strcmp(TDS_RELAY_TARGET, "buzzer") == 0 || tds >= TDS_CRITICAL_ALERT) {
+      stateBuzzer = true;
+      digitalWrite(PIN_BUZZER, HIGH);
+      Serial.printf("[TỰ TRỊ TDS] CẢNH BÁO NGUY CẤP! TDS ô nhiễm: %.0f ppm! Đã hú còi!\\n", tds);
+    }
+  }
+
+  // --- QUY TẮC 4: CẢM BIẾN ĐỘ ẨM ĐẤT (TỰ ĐỘNG TƯỚI RAU / THẢM THỰC VẬT) ---
+  if (moisture < SOIL_MOISTURE_MIN) {
+    unsigned long now = millis();
+    if (!isSoilIrrigating && (now - lastSoilPumpStartMs >= 300000 || lastSoilPumpStartMs == 0)) { // Giãn cách 5 phút
+      isSoilIrrigating = true;
+      lastSoilPumpStartMs = now;
+      if (strcmp(SOIL_RELAY_TARGET, "pump2") == 0) {
+        statePump2 = true;
+        digitalWrite(PIN_RELAY_PUMP2, RELAY_ON_LEVEL);
+        Serial.printf("[TỰ TRỊ TƯỚI] Độ ẩm đất thấp (%d%% < %d%%)! BẬT Relay 2 tưới cây (%lu giây)...\\n", moisture, SOIL_MOISTURE_MIN, SOIL_PUMP_TIME_MS / 1000);
+      } else if (strcmp(SOIL_RELAY_TARGET, "pump1") == 0 && waterLowSafe) {
+        statePump1 = true;
+        digitalWrite(PIN_RELAY_PUMP1, RELAY_ON_LEVEL);
+      }
+    }
+  }
+
+  // Tắt bơm tưới sau khi hết thời gian chạy SOIL_PUMP_TIME_MS
+  if (isSoilIrrigating && (millis() - lastSoilPumpStartMs >= SOIL_PUMP_TIME_MS)) {
+    isSoilIrrigating = false;
+    if (strcmp(SOIL_RELAY_TARGET, "pump2") == 0 && statePump2) {
+      statePump2 = false;
+      digitalWrite(PIN_RELAY_PUMP2, RELAY_OFF_LEVEL);
+      Serial.println("[TỰ TRỊ TƯỚI] Đã hoàn thành chu trình tưới ẩm đất. TẮT Relay 2.");
+    }
   }
 }
 
@@ -1165,7 +1302,7 @@ void sendTelemetryAndPoll() {
   bool waterLowSafe = readFloatLow();
   bool waterHigh = readFloatHigh();
 
-  evaluateLocalSafety(waterLowSafe);
+  evaluateAutonomousSmartRules(tds, moisture, waterLowSafe, waterHigh);
 
   if (WiFi.status() != WL_CONNECTED) {
     bufferOfflineSample((int)tds, moisture, waterLowSafe, waterHigh);
@@ -1303,7 +1440,13 @@ void setup() {
 // ====================================================================================================
 void loop() {
   maintainWiFi();
-  evaluateLocalSafety(readFloatLow());
+  
+  // Đánh giá quy tắc an toàn & kích hoạt relay tự trị liên tục mỗi chu kỳ loop
+  float currentTds = readTDS();
+  int currentMoisture = readSoilMoisture();
+  bool floatLowSafe = readFloatLow();
+  bool floatHigh = readFloatHigh();
+  evaluateAutonomousSmartRules(currentTds, currentMoisture, floatLowSafe, floatHigh);
 
   unsigned long currentMs = millis();
 

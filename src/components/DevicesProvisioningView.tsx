@@ -73,14 +73,16 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
 
   // Firmware Studio modal state
   const [isEspStudioOpen, setIsEspStudioOpen] = useState(false);
-  const [espStudioInitialTab, setEspStudioInitialTab] = useState<'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide'>('editor');
+  const [espStudioInitialTab, setEspStudioInitialTab] = useState<
+    'smart_tuning' | 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide'
+  >('smart_tuning');
   const [selectedEspStudioDevice, setSelectedEspStudioDevice] = useState<string>(
     devices[0]?.id || 'ESP32S3_ECO_01'
   );
 
   const handleOpenEspStudio = (
     deviceId?: string,
-    tab: 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide' = 'editor'
+    tab: 'smart_tuning' | 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide' = 'smart_tuning'
   ) => {
     if (deviceId) {
       setSelectedEspStudioDevice(deviceId);
@@ -241,6 +243,15 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
 
           <div className="flex items-center gap-2 flex-wrap">
             <button
+              id="btn_open_smart_tuning_header"
+              onClick={() => handleOpenEspStudio(undefined, 'smart_tuning')}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition-all cursor-pointer min-h-[44px]"
+            >
+              <Sparkles className="w-4 h-4 text-amber-300" />
+              <span>⚡ Hiệu Chỉnh Cảm Biến & Relay</span>
+            </button>
+
+            <button
               id="btn_open_code_guide_header"
               onClick={() => handleOpenEspStudio(undefined, 'code_guide')}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg text-xs font-bold shadow-xs transition-colors cursor-pointer min-h-[44px]"
@@ -340,8 +351,18 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
 
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
+                    id={`btn_tune_c_${device.id}`}
+                    onClick={() => handleOpenEspStudio(device.id, 'smart_tuning')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-teal-900 bg-teal-100 hover:bg-teal-200 border border-teal-300 transition-colors cursor-pointer min-h-[36px] shadow-xs"
+                    title="Hiệu chỉnh cảm biến TDS, phao nước, relay tự trị trước khi nạp"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-teal-700" />
+                    <span>Hiệu Chỉnh & Relay</span>
+                  </button>
+
+                  <button
                     id={`btn_code_c_${device.id}`}
-                    onClick={() => handleOpenEspStudio(device.id)}
+                    onClick={() => handleOpenEspStudio(device.id, 'editor')}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 transition-colors cursor-pointer min-h-[36px] shadow-xs"
                     title="Mở mã C++ tối ưu nạp cho ESP32 này (Key đã đưa vào, nạp trực tiếp, tối ưu năng lượng/mạng)"
                   >

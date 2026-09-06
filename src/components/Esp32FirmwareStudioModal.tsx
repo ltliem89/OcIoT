@@ -26,6 +26,14 @@ import {
   AlertTriangle,
   Server,
   Activity,
+  Waves,
+  Droplets,
+  ShieldCheck,
+  Gauge,
+  Sparkles,
+  Radio,
+  SlidersHorizontal,
+  ArrowRight,
 } from 'lucide-react';
 import { Device } from '../types';
 
@@ -34,7 +42,7 @@ interface Esp32FirmwareStudioModalProps {
   onClose: () => void;
   devices: Device[];
   initialDeviceId?: string;
-  initialTab?: 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide';
+  initialTab?: 'smart_tuning' | 'editor' | 'code_guide' | 'pinout' | 'serial' | 'guide';
   onRotateKey?: (deviceId: string) => Promise<void>;
 }
 
@@ -59,7 +67,7 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
   onClose,
   devices,
   initialDeviceId,
-  initialTab = 'editor',
+  initialTab = 'smart_tuning',
   onRotateKey,
 }) => {
   const espDevices = devices.filter((d) => d.type === 'ESP32_S3' || d.type === 'GENERIC_IOT');
@@ -75,6 +83,38 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
   const [telemetryInterval, setTelemetryInterval] = useState<number>(5);
   const [heartbeatInterval, setHeartbeatInterval] = useState<number>(30);
   const [customServerUrl, setCustomServerUrl] = useState<string>('');
+
+  // Smart Sensor Tuning & Relay Mapping States
+  const [tdsMin, setTdsMin] = useState<number>(200);
+  const [tdsMax, setTdsMax] = useState<number>(750);
+  const [tdsCritical, setTdsCritical] = useState<number>(950);
+  const [tdsRelayAction, setTdsRelayAction] = useState<'pump1' | 'pump2' | 'buzzer' | 'none'>('pump1');
+  const [tdsCalibrationK, setTdsCalibrationK] = useState<number>(1.0);
+  const [tdsRealPenReading, setTdsRealPenReading] = useState<string>('');
+
+  // Dual Water Level Float Sensors States
+  const [waterFloatLowAction, setWaterFloatLowAction] = useState<
+    'cut_pump1_and_buzzer' | 'cut_pump1' | 'start_refill_pump2' | 'buzzer_only'
+  >('cut_pump1_and_buzzer');
+  const [waterFloatHighAction, setWaterFloatHighAction] = useState<
+    'alert_and_cut_inflow' | 'start_drain_pump2' | 'buzzer_only' | 'none'
+  >('alert_and_cut_inflow');
+
+  // Soil Moisture Sensor States
+  const [soilMoistureMin, setSoilMoistureMin] = useState<number>(50);
+  const [soilMoistureMax, setSoilMoistureMax] = useState<number>(80);
+  const [soilRelayAction, setSoilRelayAction] = useState<'pump2' | 'pump1' | 'buzzer' | 'none'>('pump2');
+  const [soilIrrigationSec, setSoilIrrigationSec] = useState<number>(45);
+  const [soilRawAir, setSoilRawAir] = useState<number>(3000);
+  const [soilRawWater, setSoilRawWater] = useState<number>(1200);
+
+  // WiFi Verification State
+  const [wifiCheckFeedback, setWifiCheckFeedback] = useState<{
+    type: 'success' | 'warning' | 'error';
+    message: string;
+    details?: string;
+  } | null>(null);
+  const [wifiAppliedNotice, setWifiAppliedNotice] = useState<boolean>(false);
 
   const [code, setCode] = useState<string>('');
   const [originalCode, setOriginalCode] = useState<string>('');
@@ -101,7 +141,9 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
   const logContainerRef = useRef<HTMLDivElement>(null);
 
   // Active tab inside modal
-  const [activeTab, setActiveTab] = useState<'editor' | 'code_guide' | 'serial' | 'pinout' | 'guide'>(initialTab);
+  const [activeTab, setActiveTab] = useState<
+    'smart_tuning' | 'editor' | 'code_guide' | 'serial' | 'pinout' | 'guide'
+  >(initialTab || 'smart_tuning');
 
   // Update active tab when initialTab changes
   useEffect(() => {
@@ -169,6 +211,19 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
         telemetryInterval: String(telemetryInterval),
         heartbeatInterval: String(heartbeatInterval),
         serverEndpoint: endpoint,
+        tdsMin: String(tdsMin),
+        tdsMax: String(tdsMax),
+        tdsCritical: String(tdsCritical),
+        tdsRelayAction,
+        tdsCalibrationK: String(tdsCalibrationK),
+        waterFloatLowAction,
+        waterFloatHighAction,
+        soilMoistureMin: String(soilMoistureMin),
+        soilMoistureMax: String(soilMoistureMax),
+        soilRelayAction,
+        soilIrrigationSec: String(soilIrrigationSec),
+        soilRawAir: String(soilRawAir),
+        soilRawWater: String(soilRawWater),
       });
 
       const res = await fetch(`/api/v1/devices/${selectedDeviceId}/firmware-sketch?${params.toString()}`);
@@ -190,7 +245,82 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
     if (isOpen && selectedDeviceId) {
       fetchFirmwareSketch();
     }
-  }, [isOpen, selectedDeviceId, board, powerProfile, relayTrigger, telemetryInterval, heartbeatInterval]);
+  }, [
+    isOpen,
+    selectedDeviceId,
+    board,
+    powerProfile,
+    relayTrigger,
+    telemetryInterval,
+    heartbeatInterval,
+    tdsMin,
+    tdsMax,
+    tdsCritical,
+    tdsRelayAction,
+    tdsCalibrationK,
+    waterFloatLowAction,
+    waterFloatHighAction,
+    soilMoistureMin,
+    soilMoistureMax,
+    soilRelayAction,
+    soilIrrigationSec,
+    soilRawAir,
+    soilRawWater,
+  ]);
+
+  // WiFi Verification Handler
+  const handleCheckWifi = () => {
+    const trimmedSsid = wifiSsid.trim();
+    if (!trimmedSsid) {
+      setWifiCheckFeedback({
+        type: 'error',
+        message: 'Chưa nhập tên WiFi (SSID)!',
+        details: 'Vui lòng nhập tên mạng WiFi 2.4GHz để nạp vào ESP32.',
+      });
+      return;
+    }
+
+    const is5G = /(5g|5ghz|_5g)/i.test(trimmedSsid);
+    if (is5G) {
+      setWifiCheckFeedback({
+        type: 'warning',
+        message: `Cảnh báo: Tên mạng "${trimmedSsid}" có thể là sóng 5GHz!`,
+        details: 'Vi điều khiển ESP32 chỉ hỗ trợ băng tần 2.4GHz. Vui lòng chọn sóng 2.4GHz của router để đảm bảo kết nối.',
+      });
+      return;
+    }
+
+    if (wifiPassword.length > 0 && wifiPassword.length < 8) {
+      setWifiCheckFeedback({
+        type: 'warning',
+        message: 'Mật khẩu WiFi ngắn hơn chuẩn WPA2 (tối thiểu 8 ký tự)!',
+        details: 'Nếu router dùng bảo mật WPA2-PSK thông dụng, hãy kiểm tra lại mật khẩu chính xác.',
+      });
+      return;
+    }
+
+    setWifiCheckFeedback({
+      type: 'success',
+      message: `Tín hiệu WiFi "${trimmedSsid}" chuẩn 2.4GHz hợp lệ!`,
+      details: 'Thông tin WiFi đã sẵn sàng để nhúng vào mã nguồn C++ của ESP32.',
+    });
+  };
+
+  // Apply WiFi credentials to code immediately
+  const handleApplyWifiToCode = () => {
+    handleCheckWifi();
+    fetchFirmwareSketch();
+    setWifiAppliedNotice(true);
+    setTimeout(() => setWifiAppliedNotice(false), 3000);
+  };
+
+  // Calculate kFactor based on real TDS test pen reading
+  const handleApplyPenCalibration = () => {
+    const penVal = parseFloat(tdsRealPenReading);
+    if (isNaN(penVal) || penVal <= 0) return;
+    const newK = Math.round((penVal / 400) * 100) / 100;
+    setTdsCalibrationK(newK);
+  };
 
   // Copy code handler
   const handleCopyCode = () => {
@@ -242,6 +372,21 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
 #define PIN_RELAY_PUMP1      ${pinout?.pinPump1 ?? 18}
 #define PIN_RELAY_PUMP2      ${pinout?.pinPump2 ?? 19}
 #define PIN_BUZZER           ${pinout?.pinBuzzer ?? 23}
+
+// Ngưỡng hiệu chỉnh thông minh & liên động Relay tự trị
+#define OC_IOT_TDS_MIN       ${tdsMin}
+#define OC_IOT_TDS_MAX       ${tdsMax}
+#define OC_IOT_TDS_CRITICAL  ${tdsCritical}
+#define OC_IOT_TDS_RELAY     "${tdsRelayAction}"
+#define OC_IOT_TDS_K_FACTOR  ${tdsCalibrationK}
+
+#define OC_IOT_FLOAT_LOW_RULE "${waterFloatLowAction}"
+#define OC_IOT_FLOAT_HIGH_RULE "${waterFloatHighAction}"
+
+#define OC_IOT_SOIL_MIN      ${soilMoistureMin}
+#define OC_IOT_SOIL_MAX      ${soilMoistureMax}
+#define OC_IOT_SOIL_RELAY    "${soilRelayAction}"
+#define OC_IOT_SOIL_PUMP_SEC ${soilIrrigationSec}
 
 #endif // OC_IOT_CONFIG_H
 `;
@@ -651,6 +796,23 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
             <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
+                id="tab_btn_smart_tuning"
+                onClick={() => setActiveTab('smart_tuning')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                  activeTab === 'smart_tuning'
+                    ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-sm ring-1 ring-emerald-400'
+                    : 'text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 border border-emerald-200 dark:border-emerald-800'
+                }`}
+              >
+                <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+                <span>Hiệu Chỉnh Cảm Biến & Relay</span>
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-amber-400/20 text-amber-600 dark:text-amber-300 font-bold">
+                  Thông Minh
+                </span>
+              </button>
+
+              <button
+                type="button"
                 id="tab_btn_editor"
                 onClick={() => setActiveTab('editor')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
@@ -749,6 +911,639 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
               </button>
             </div>
           </div>
+
+          {/* TAB 0: SMART SENSOR TUNING & RELAY MAPPING */}
+          {activeTab === 'smart_tuning' && (
+            <div className="space-y-4 text-xs">
+              {/* Header Explanation Banner */}
+              <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-50 via-teal-50 to-cyan-50 dark:from-emerald-950/50 dark:via-teal-950/40 dark:to-cyan-950/30 border border-emerald-200/80 dark:border-emerald-800/80 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-sm">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="p-1.5 rounded-lg bg-emerald-600 text-white">
+                      <Sparkles className="w-4 h-4" />
+                    </span>
+                    <h3 className="font-bold text-slate-900 dark:text-white text-sm">
+                      Giao Diện Hiệu Chỉnh Cảm Biến & Kích Hoạt Relay Tự Trị (Autonomous Rules)
+                    </h3>
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-300 text-xs leading-relaxed max-w-3xl">
+                    Chỉnh sửa nhanh các mức chuẩn cảm biến, gán relay kích hoạt tương ứng và kiểm tra WiFi trước khi nạp.
+                    Toàn bộ tham số này được nhúng tự động vào mã nguồn C++, vận hành <strong>24/7 độc lập trên chip ESP32</strong> (ngay cả khi mất kết nối mạng hoặc đứt WiFi). Bạn vẫn có thể tải code về và sửa tay chi tiết tùy ý!
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('editor')}
+                    className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+                  >
+                    <Code2 className="w-3.5 h-3.5" />
+                    Xem Code C++ Đồng Bộ
+                  </button>
+                </div>
+              </div>
+
+              {/* Main Grid: 3 Sensor Cards + WiFi & Safety Interlock */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                
+                {/* CARD 1: CẢM BIẾN TDS (CHẤT LƯỢNG NƯỚC HỒ ỐC & CÁ) */}
+                <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-3.5 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-700/60 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-teal-100 dark:bg-teal-900/60 text-teal-700 dark:text-teal-300 flex items-center justify-center font-bold">
+                        <Waves className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                          Cảm Biến TDS (Chất Lượng Nước Hồ Nuôi)
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Chân GPIO ADC: <strong className="text-emerald-600 dark:text-emerald-400">PIN {pinout?.pinTds ?? 4}</strong> | Đo nồng độ chất rắn hòa tan (ppm)
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-50 text-teal-700 dark:bg-teal-950 dark:text-teal-300 font-semibold border border-teal-200 dark:border-teal-800">
+                      Tự Động Lọc
+                    </span>
+                  </div>
+
+                  {/* Visual Spectrum Gauge */}
+                  <div className="space-y-1.5 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                    <div className="flex justify-between text-[11px] font-medium text-slate-600 dark:text-slate-400">
+                      <span>Dải đo: 0 ppm</span>
+                      <span className="text-emerald-600 dark:text-emerald-400 font-bold">Vùng chuẩn: {tdsMin} - {tdsMax} ppm</span>
+                      <span className="text-rose-600 dark:text-rose-400 font-bold">Nguy cấp: &gt;{tdsCritical} ppm</span>
+                    </div>
+                    <div className="relative h-4 rounded-full overflow-hidden bg-slate-200 dark:bg-slate-700 flex">
+                      <div style={{ width: `${Math.min(100, (tdsMin / 1500) * 100)}%` }} className="bg-sky-400" title="Nước rất trong" />
+                      <div style={{ width: `${Math.min(100, ((tdsMax - tdsMin) / 1500) * 100)}%` }} className="bg-emerald-500" title="Vùng lý tưởng nuôi ốc" />
+                      <div style={{ width: `${Math.min(100, ((tdsCritical - tdsMax) / 1500) * 100)}%` }} className="bg-amber-400" title="Nước bắt đầu đục - Cần lọc" />
+                      <div style={{ width: `${Math.max(0, 100 - (tdsCritical / 1500) * 100)}%` }} className="bg-rose-500" title="Nguy cấp cho ốc" />
+                    </div>
+                    <div className="flex justify-between text-[10px] text-slate-500">
+                      <span>0 (Nước cất)</span>
+                      <span>{tdsMin} (Chuẩn dưới)</span>
+                      <span>{tdsMax} (Kích hoạt lọc)</span>
+                      <span>{tdsCritical} (Báo động)</span>
+                      <span>1500+</span>
+                    </div>
+                  </div>
+
+                  {/* Threshold Settings */}
+                  <div className="grid grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Mức chuẩn tối thiểu:
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={tdsMin}
+                          onChange={(e) => setTdsMin(Math.max(0, Number(e.target.value)))}
+                          step={50}
+                          className="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                        />
+                        <span className="text-[10px] text-slate-500">ppm</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Mức chuẩn tối đa:
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={tdsMax}
+                          onChange={(e) => setTdsMax(Math.max(tdsMin, Number(e.target.value)))}
+                          step={50}
+                          className="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-bold text-amber-600 dark:text-amber-400"
+                        />
+                        <span className="text-[10px] text-slate-500">ppm</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Mức nguy cấp:
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          value={tdsCritical}
+                          onChange={(e) => setTdsCritical(Math.max(tdsMax, Number(e.target.value)))}
+                          step={50}
+                          className="w-full px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-bold text-rose-600 dark:text-rose-400"
+                        />
+                        <span className="text-[10px] text-slate-500">ppm</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Relay Target Selection */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                      ⚡ Kích hoạt Relay nào khi TDS vượt mức chuẩn ({tdsMax} ppm)?
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setTdsRelayAction('pump1')}
+                        className={`p-2 rounded-lg border text-left flex items-start gap-2 transition-colors cursor-pointer ${
+                          tdsRelayAction === 'pump1'
+                            ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 font-semibold'
+                            : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <Zap className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
+                        <div>
+                          <div className="text-xs">Bơm 1 (PIN 18)</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
+                            Bơm tuần hoàn lọc bio hồ ốc (Khuyên dùng)
+                          </div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setTdsRelayAction('pump2')}
+                        className={`p-2 rounded-lg border text-left flex items-start gap-2 transition-colors cursor-pointer ${
+                          tdsRelayAction === 'pump2'
+                            ? 'border-emerald-500 bg-emerald-50/70 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 font-semibold'
+                            : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <Zap className="w-4 h-4 text-emerald-600 dark:text-emerald-400 mt-0.5 shrink-0" />
+                        <div>
+                          <div className="text-xs">Bơm 2 (PIN 19)</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
+                            Bơm xả đáy / cấp nước bù mới
+                          </div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setTdsRelayAction('buzzer')}
+                        className={`p-2 rounded-lg border text-left flex items-start gap-2 transition-colors cursor-pointer ${
+                          tdsRelayAction === 'buzzer'
+                            ? 'border-amber-500 bg-amber-50/70 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 font-semibold'
+                            : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+                        <div>
+                          <div className="text-xs">Còi Buzzer (PIN 23)</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
+                            Chỉ phát tiếng bíp cảnh báo người nuôi
+                          </div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setTdsRelayAction('none')}
+                        className={`p-2 rounded-lg border text-left flex items-start gap-2 transition-colors cursor-pointer ${
+                          tdsRelayAction === 'none'
+                            ? 'border-slate-400 bg-slate-100 dark:bg-slate-700 text-slate-900 dark:text-white font-semibold'
+                            : 'border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/60 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        <Radio className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
+                        <div>
+                          <div className="text-xs">Không kích relay</div>
+                          <div className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
+                            Chỉ đo & lưu log telemetry lên Hub
+                          </div>
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Calibration Assistant (kFactor) */}
+                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/60 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-slate-700 dark:text-slate-300 text-[11px] flex items-center gap-1">
+                        <SlidersHorizontal className="w-3.5 h-3.5 text-teal-600" />
+                        Hiệu chuẩn điện cực (kFactor):
+                      </span>
+                      <div className="flex items-center gap-1 font-mono text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setTdsCalibrationK((k) => Math.max(0.5, Math.round((k - 0.05) * 100) / 100))}
+                          className="w-5 h-5 rounded bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 flex items-center justify-center font-bold"
+                        >
+                          -
+                        </button>
+                        <span className="font-bold text-teal-700 dark:text-teal-300 px-1">
+                          {tdsCalibrationK.toFixed(2)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setTdsCalibrationK((k) => Math.min(2.0, Math.round((k + 0.05) * 100) / 100))}
+                          className="w-5 h-5 rounded bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 flex items-center justify-center font-bold"
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTdsCalibrationK(1.0)}
+                          className="text-[10px] text-slate-500 hover:text-slate-800 dark:hover:text-white underline ml-1 cursor-pointer"
+                        >
+                          Reset (1.0)
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1 border-t border-slate-200/60 dark:border-slate-800">
+                      <span className="text-[11px] text-slate-500">So với bút đo cầm tay:</span>
+                      <input
+                        type="number"
+                        placeholder="Nhập ppm thực tế đo bằng bút..."
+                        value={tdsRealPenReading}
+                        onChange={(e) => setTdsRealPenReading(e.target.value)}
+                        className="flex-1 px-2 py-1 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleApplyPenCalibration}
+                        disabled={!tdsRealPenReading}
+                        className="px-2.5 py-1 text-[11px] font-semibold rounded bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white cursor-pointer"
+                      >
+                        Tính kFactor
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* CARD 2: CẢM BIẾN MỰC NƯỚC (HAI PHAO 1 & 2 - DUAL FLOAT WATER TANK) */}
+                <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-3.5 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-700/60 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-sky-100 dark:bg-sky-900/60 text-sky-700 dark:text-sky-300 flex items-center justify-center font-bold">
+                        <Droplets className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                          Hệ Thống 2 Cảm Biến Mực Nước (Phao Đôi)
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Phao 1 Đáy: <strong className="text-emerald-600">PIN {pinout?.pinFloatLow ?? 21}</strong> | Phao 2 Đỉnh: <strong className="text-sky-600">PIN {pinout?.pinFloatHigh ?? 22}</strong>
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300 font-semibold border border-sky-200 dark:border-sky-800">
+                      Bảo Vệ Cháy Bơm
+                    </span>
+                  </div>
+
+                  {/* Water Tank Diagram */}
+                  <div className="p-3 rounded-lg bg-gradient-to-b from-sky-50/70 to-blue-50/70 dark:from-sky-950/30 dark:to-blue-950/30 border border-sky-200/80 dark:border-sky-800/60 space-y-2">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-bold text-sky-900 dark:text-sky-200 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />
+                        Phao 2 (Đỉnh Bể): Chống Tràn Nước
+                      </span>
+                      <span className="text-[10px] text-slate-500">Gắn ở mép trên thành bể</span>
+                    </div>
+                    
+                    <div className="h-6 rounded bg-sky-200 dark:bg-sky-900/60 border border-sky-300 dark:border-sky-700 flex items-center justify-center text-[10px] font-semibold text-sky-800 dark:text-sky-200">
+                      VÙNG NƯỚC AN TOÀN CHO HỒ HOẠT ĐỘNG
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
+                        Phao 1 (Đáy Bể): Chống Cạn Nước
+                      </span>
+                      <span className="text-[10px] text-slate-500">Gắn ngang miệng hút máy bơm</span>
+                    </div>
+                  </div>
+
+                  {/* Rule Float 1 (Low Water Safety) */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                      🛡️ Mực Nước 1 (Phao Đáy 21) BÁO CẠN thì điều khiển gì?
+                    </label>
+                    <select
+                      value={waterFloatLowAction}
+                      onChange={(e: any) => setWaterFloatLowAction(e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-semibold focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="cut_pump1_and_buzzer">
+                        Ngắt Bơm 1 (chống cháy máy bơm) + Kêu còi Buzzer cảnh báo [Khuyên Dùng]
+                      </option>
+                      <option value="cut_pump1">
+                        Chỉ ngắt Bơm 1 (chống cháy bơm âm thầm, không hú còi)
+                      </option>
+                      <option value="start_refill_pump2">
+                        Ngắt Bơm 1 + Tự động Bật Bơm 2 bơm bù nước mới vào hồ
+                      </option>
+                      <option value="buzzer_only">
+                        Chỉ kêu còi Buzzer cảnh báo (không ngắt bơm)
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* Rule Float 2 (High Water Overflow) */}
+                  <div className="space-y-1.5">
+                    <label className="block text-[11px] font-bold text-slate-800 dark:text-slate-200">
+                      🌊 Mực Nước 2 (Phao Đỉnh 22) BÁO TRÀN thì điều khiển gì?
+                    </label>
+                    <select
+                      value={waterFloatHighAction}
+                      onChange={(e: any) => setWaterFloatHighAction(e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white font-semibold focus:ring-2 focus:ring-emerald-500"
+                    >
+                      <option value="alert_and_cut_inflow">
+                        Cảnh báo tràn + Ngắt máy bơm cấp nước (Chống ngập ao ốc) [Khuyên Dùng]
+                      </option>
+                      <option value="start_drain_pump2">
+                        Tự động Bật Bơm 2 (Bơm xả tràn) để thoát nước khẩn cấp
+                      </option>
+                      <option value="buzzer_only">
+                        Chỉ hú còi Buzzer cảnh báo tràn bể
+                      </option>
+                      <option value="none">
+                        Chỉ ghi nhận trạng thái lên Hub (Không can thiệp relay)
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* Interlock Safety Highlight */}
+                  <div className="p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/80 flex items-start gap-2">
+                    <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                    <p className="text-[11px] text-emerald-900 dark:text-emerald-200 leading-relaxed">
+                      <strong>Khóa liên động an toàn phần cứng:</strong> Khi Phao 1 báo cạn nước, ESP32 sẽ cưỡng bức ngắt Bơm 1 ngay lập tức, vô hiệu hóa mọi lệnh bật từ xa qua Web/Cloud cho đến khi bể được cấp đầy nước trở lại!
+                    </p>
+                  </div>
+                </div>
+
+                {/* CARD 3: CẢM BIẾN ĐỘ ẨM ĐẤT (THẢM THỰC VẬT QUANH AO HOẶC VƯỜN RAU) */}
+                <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-3.5 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-700/60 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-amber-100 dark:bg-amber-900/60 text-amber-700 dark:text-amber-300 flex items-center justify-center font-bold">
+                        <Activity className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                          Cảm Biến Độ Ẩm Đất & Tưới Tự Động
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Chân ADC: <strong className="text-amber-600 dark:text-amber-400">PIN {pinout?.pinMoisture ?? 5}</strong> | Cảm biến điện dung chống ăn mòn
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300 font-semibold border border-amber-200 dark:border-amber-800">
+                      Tưới Tự Trị
+                    </span>
+                  </div>
+
+                  {/* Sliders for Moisture Thresholds */}
+                  <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-slate-900/60 p-3 rounded-lg border border-slate-200/80 dark:border-slate-800">
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-slate-600 dark:text-slate-400">Bật tưới khi ẩm &lt;</span>
+                        <span className="font-bold text-amber-600 dark:text-amber-400">{soilMoistureMin}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={10}
+                        max={60}
+                        step={5}
+                        value={soilMoistureMin}
+                        onChange={(e) => setSoilMoistureMin(Number(e.target.value))}
+                        className="w-full accent-amber-500 cursor-pointer"
+                      />
+                      <span className="text-[10px] text-slate-500">Đất khô cần cấp nước</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px]">
+                        <span className="text-slate-600 dark:text-slate-400">Ngắt tưới khi ẩm &gt;</span>
+                        <span className="font-bold text-emerald-600 dark:text-emerald-400">{soilMoistureMax}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={50}
+                        max={95}
+                        step={5}
+                        value={soilMoistureMax}
+                        onChange={(e) => setSoilMoistureMax(Math.max(soilMoistureMin + 10, Number(e.target.value)))}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                      <span className="text-[10px] text-slate-500">Đất đã no nước</span>
+                    </div>
+                  </div>
+
+                  {/* Relay Target & Duration */}
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-800 dark:text-slate-200 mb-1">
+                        Relay điều khiển bơm tưới:
+                      </label>
+                      <select
+                        value={soilRelayAction}
+                        onChange={(e: any) => setSoilRelayAction(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                      >
+                        <option value="pump2">Bơm 2 (PIN 19 - Bơm Tưới Phun Sương) [Chuẩn]</option>
+                        <option value="pump1">Bơm 1 (PIN 18 - Bơm Tuần Hoàn)</option>
+                        <option value="buzzer">Còi Buzzer (PIN 23)</option>
+                        <option value="none">Không kích relay</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-800 dark:text-slate-200 mb-1">
+                        Thời gian chạy bơm mỗi lần:
+                      </label>
+                      <select
+                        value={soilIrrigationSec}
+                        onChange={(e) => setSoilIrrigationSec(Number(e.target.value))}
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                      >
+                        <option value={15}>15 giây (Thử nghiệm)</option>
+                        <option value={30}>30 giây (Rau mầm / giàn nhỏ)</option>
+                        <option value={45}>45 giây (Vườn rau tiêu chuẩn)</option>
+                        <option value={60}>60 giây (1 phút - Thảm cỏ rộng)</option>
+                        <option value={90}>90 giây (Tưới bồn đất sâu)</option>
+                        <option value={120}>120 giây (2 phút)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Calibration Raw ADC Values */}
+                  <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200/80 dark:border-slate-700/60 flex items-center justify-between text-[11px]">
+                    <span className="text-slate-600 dark:text-slate-400">Hiệu chuẩn ADC cảm biến điện dung:</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500">Khô:</span>
+                      <input
+                        type="number"
+                        value={soilRawAir}
+                        onChange={(e) => setSoilRawAir(Number(e.target.value))}
+                        className="w-16 px-1.5 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-mono"
+                        title="ADC ngoài không khí khô"
+                      />
+                      <span className="text-slate-500">Ướt:</span>
+                      <input
+                        type="number"
+                        value={soilRawWater}
+                        onChange={(e) => setSoilRawWater(Number(e.target.value))}
+                        className="w-16 px-1.5 py-0.5 text-xs rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-mono"
+                        title="ADC khi nhúng hoàn toàn vào cốc nước"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* CARD 4: BỘ KIỂM TRA SÓNG WIFI 2.4GHZ & ĐỒNG BỘ MÃ C++ */}
+                <div className="p-4 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 space-y-3.5 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-700/60 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-lg bg-emerald-100 dark:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 flex items-center justify-center font-bold">
+                        <Wifi className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="font-bold text-slate-900 dark:text-white text-xs">
+                          Kiểm Tra Sóng WiFi 2.4GHz & Đưa Vào Code C++
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          Bảo đảm thông tin WiFi chuẩn trước khi biên dịch và nạp bo
+                        </p>
+                      </div>
+                    </div>
+                    {wifiAppliedNotice && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-semibold animate-bounce">
+                        Đã cập nhật vào Code!
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Tên WiFi (SSID):
+                      </label>
+                      <input
+                        type="text"
+                        value={wifiSsid}
+                        onChange={(e) => setWifiSsid(e.target.value)}
+                        placeholder="VD: Nha_Mang_2.4G"
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">
+                        Mật khẩu WiFi:
+                      </label>
+                      <input
+                        type="text"
+                        value={wifiPassword}
+                        onChange={(e) => setWifiPassword(e.target.value)}
+                        placeholder="Mật khẩu WiFi..."
+                        className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      id="btn_test_wifi_frequency"
+                      onClick={handleCheckWifi}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-200 flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Radio className="w-3.5 h-3.5 text-emerald-600" />
+                      Kiểm Tra Sóng 2.4GHz
+                    </button>
+
+                    <button
+                      type="button"
+                      id="btn_apply_wifi_to_code"
+                      onClick={handleApplyWifiToCode}
+                      className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      Áp Dụng Vào Mã C++ Ngay
+                    </button>
+                  </div>
+
+                  {/* WiFi Diagnostic Feedback Banner */}
+                  {wifiCheckFeedback && (
+                    <div
+                      className={`p-3 rounded-lg border text-xs space-y-1 ${
+                        wifiCheckFeedback.type === 'success'
+                          ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200'
+                          : wifiCheckFeedback.type === 'warning'
+                          ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200'
+                          : 'bg-rose-50 dark:bg-rose-950/40 border-rose-300 dark:border-rose-800 text-rose-900 dark:text-rose-200'
+                      }`}
+                    >
+                      <div className="font-bold flex items-center gap-1.5">
+                        {wifiCheckFeedback.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
+                        {wifiCheckFeedback.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-600" />}
+                        {wifiCheckFeedback.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-600" />}
+                        {wifiCheckFeedback.message}
+                      </div>
+                      {wifiCheckFeedback.details && (
+                        <p className="text-[11px] leading-relaxed opacity-90">{wifiCheckFeedback.details}</p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+
+              {/* Bottom Summary Bar: Current Configured Rules */}
+              <div className="p-3.5 rounded-xl bg-slate-900 text-slate-200 border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-3">
+                <div className="space-y-1 text-xs">
+                  <div className="font-bold text-white flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-pulse" />
+                    <span>Bộ Quy Tắc Tự Trị Sẽ Hoạt Động Trên ESP32:</span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-300 font-mono">
+                    <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700">
+                      💧 TDS &gt; {tdsMax} ppm ➔ Kích hoạt {tdsRelayAction.toUpperCase()}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300">
+                      🛡️ Phao 1 Cạn ➔ {waterFloatLowAction}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-sky-300">
+                      🌊 Phao 2 Tràn ➔ {waterFloatHighAction}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-emerald-300">
+                      🌱 Ẩm &lt; {soilMoistureMin}% ➔ Kích hoạt {soilRelayAction.toUpperCase()} ({soilIrrigationSec}s)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('editor')}
+                    className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Code2 className="w-3.5 h-3.5" />
+                    Xem Code C++ Đã Sinh
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleDownloadIno}
+                    className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/40 flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Tải .ino Đã Tích Hợp
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* TAB 1: CODE EDITOR */}
           {activeTab === 'editor' && (

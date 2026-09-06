@@ -386,6 +386,7 @@ export default function App() {
     name: string;
     deviceId?: string;
     templateId?: string;
+    deviceType?: string;
   }) => {
     const res = await provisionV4Device(payload);
     // Refresh devices list

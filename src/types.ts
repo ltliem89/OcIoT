@@ -161,7 +161,7 @@ export interface Device {
   id: string;
   projectId: string;
   name: string;
-  type: 'ESP32_S3' | 'AI_PC' | 'GENERIC_IOT';
+  type: 'ESP32_S3' | 'ESP32_S2' | 'ESP32' | 'ESP32_C3' | 'AI_PC' | 'GENERIC_IOT';
   templateId: string;
   firmwareVersion: string;
   currentConfigVersion: number;

@@ -46,7 +46,7 @@ interface Esp32FirmwareStudioModalProps {
   onRotateKey?: (deviceId: string) => Promise<void>;
 }
 
-type BoardType = 'esp32s3' | 'esp32' | 'esp32c3' | 'esp32_xiao';
+type BoardType = 'esp32s3' | 'esp32s2' | 'esp32' | 'esp32c3' | 'esp32_xiao';
 type PowerProfile = 'continuous' | 'modem_sleep' | 'solar_sleep';
 type RelayTrigger = 'LOW' | 'HIGH';
 
@@ -70,7 +70,7 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
   initialTab = 'smart_tuning',
   onRotateKey,
 }) => {
-  const espDevices = devices.filter((d) => d.type === 'ESP32_S3' || d.type === 'GENERIC_IOT');
+  const espDevices = devices.filter((d) => d.type.startsWith('ESP32') || d.type === 'GENERIC_IOT');
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>(
     initialDeviceId || espDevices[0]?.id || 'ESP32S3_ECO_01'
   );
@@ -167,6 +167,23 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
       setSelectedDeviceId(espDevices[0].id);
     }
   }, [initialDeviceId, espDevices]);
+
+  // Auto-detect & select board based on device type or ID
+  useEffect(() => {
+    const dev = devices.find((d) => d.id === selectedDeviceId);
+    if (dev) {
+      const idUpper = dev.id.toUpperCase();
+      if (dev.type === 'ESP32_S2' || idUpper.includes('S2') || dev.firmwareVersion?.includes('esp32s2')) {
+        setBoard('esp32s2');
+      } else if (dev.type === 'ESP32_C3' || idUpper.includes('C3') || dev.firmwareVersion?.includes('esp32c3')) {
+        setBoard('esp32c3');
+      } else if (dev.type === 'ESP32' || dev.firmwareVersion?.includes('esp32-')) {
+        setBoard('esp32');
+      } else if (dev.type === 'ESP32_S3' || idUpper.includes('S3') || dev.firmwareVersion?.includes('esp32s3')) {
+        setBoard('esp32s3');
+      }
+    }
+  }, [selectedDeviceId, devices]);
 
   // Health check for Hub endpoint
   const checkHubHealth = async () => {
@@ -597,13 +614,19 @@ export const Esp32FirmwareStudioModal: React.FC<Esp32FirmwareStudioModalProps> =
                 </span>
                 <span className="text-[11px] text-slate-500">Tự động cấu hình GPIO pinout</span>
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {[
                   {
                     id: 'esp32s3',
                     label: 'ESP32-S3 DevKit',
                     desc: 'WROOM-1 / N16R8 (Khuyên dùng)',
                     badge: 'Dual-Core',
+                  },
+                  {
+                    id: 'esp32s2',
+                    label: 'ESP32-S2 DevKit',
+                    desc: 'Saola / WROOM / USB Native',
+                    badge: 'Single-Core',
                   },
                   {
                     id: 'esp32',
@@ -2005,7 +2028,15 @@ const unsigned long HEARTBEAT_INTERVAL_MS = 30000; // 30 giây gửi nhịp tim`
                   </li>
                   <li>Vào <em>Tools → Manage Libraries (Ctrl+Shift+I)</em>, tìm và cài đặt thư viện <strong>ArduinoJson</strong> (phiên bản 6.x hoặc 7.x).</li>
                   <li>Nhấn nút <strong>"Tải .ino"</strong> trên thanh công cụ và mở tệp vừa tải bằng Arduino IDE.</li>
-                  <li>Chọn bo mạch: <em>Tools → Board → ESP32S3 Dev Module</em> (hoặc loại bo bạn đang dùng).</li>
+                  <li>
+                    Chọn bo mạch trong <em>Tools → Board → esp32</em>:
+                    <ul className="list-disc list-inside ml-3 mt-1 space-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                      <li><strong>ESP32-S3:</strong> Chọn <em>ESP32S3 Dev Module</em>.</li>
+                      <li><strong>ESP32-S2:</strong> Chọn <em>ESP32S2 Dev Module</em> (hoặc <em>ESP32-S2 Saola 1</em>) & đặt <em>Tools → USB CDC On Boot: "Enabled"</em>.</li>
+                      <li><strong>ESP32 WROOM:</strong> Chọn <em>ESP32 Dev Module</em>.</li>
+                      <li><strong>ESP32-C3:</strong> Chọn <em>ESP32C3 Dev Module</em>.</li>
+                    </ul>
+                  </li>
                   <li>Cắm cáp Type-C vào máy tính, chọn đúng cổng COM và bấm nút <strong>Upload (Ctrl+U)</strong>.</li>
                 </ol>
               </div>

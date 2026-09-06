@@ -35,6 +35,7 @@ interface DevicesProvisioningViewProps {
     name: string;
     deviceId?: string;
     templateId?: string;
+    deviceType?: string;
   }) => Promise<ProvisioningResult>;
   onRotateKey: (deviceId: string) => Promise<{ newDeviceKey: string; keyVersion: number }>;
   onRevokeKey: (deviceId: string) => Promise<any>;
@@ -54,6 +55,7 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
   const [isWizardOpen, setIsWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState<1 | 2 | 3 | 4>(1);
 
+  const [deviceType, setDeviceType] = useState<'ESP32_S3' | 'ESP32_S2' | 'ESP32' | 'ESP32_C3'>('ESP32_S3');
   const [deviceName, setDeviceName] = useState('');
   const [customDeviceId, setCustomDeviceId] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState('tmpl_aquaponics_v1');
@@ -157,6 +159,7 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
   }, [provisioningResult]);
 
   const handleStartWizard = () => {
+    setDeviceType('ESP32_S3');
     const randomId = `ESP32S3_NODE_${Math.floor(1000 + Math.random() * 9000)}`;
     setDeviceName('Trạm Vệ Tinh Hồ Nuôi ' + (devices.length + 1));
     setCustomDeviceId(randomId);
@@ -166,6 +169,14 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
     setIsWizardOpen(true);
   };
 
+  const handleSelectDeviceType = (type: 'ESP32_S3' | 'ESP32_S2' | 'ESP32' | 'ESP32_C3') => {
+    setDeviceType(type);
+    const prefix =
+      type === 'ESP32_S2' ? 'ESP32S2' : type === 'ESP32_C3' ? 'ESP32C3' : type === 'ESP32' ? 'ESP32' : 'ESP32S3';
+    const num = Math.floor(1000 + Math.random() * 9000);
+    setCustomDeviceId(`${prefix}_NODE_${num}`);
+  };
+
   const handleCompleteStep2 = async () => {
     setIsSubmitting(true);
     try {
@@ -173,6 +184,7 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
         name: deviceName,
         deviceId: customDeviceId,
         templateId: selectedTemplate,
+        deviceType,
       });
       setProvisioningResult(result);
       setWizardStep(3);
@@ -472,6 +484,59 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
               <div className="py-4 space-y-4">
                 <div>
                   <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Loại Bo Mạch Phần Cứng *
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      {
+                        type: 'ESP32_S3' as const,
+                        name: 'ESP32-S3',
+                        desc: 'Dual-Core (Khuyên Dùng)',
+                        badge: 'WROOM-1',
+                      },
+                      {
+                        type: 'ESP32_S2' as const,
+                        name: 'ESP32-S2',
+                        desc: 'Single-Core / USB OTG',
+                        badge: 'Saola / DevKit',
+                      },
+                      {
+                        type: 'ESP32' as const,
+                        name: 'ESP32 WROOM',
+                        desc: 'Phổ biến 30/38 pin',
+                        badge: 'Standard',
+                      },
+                      {
+                        type: 'ESP32_C3' as const,
+                        name: 'ESP32-C3',
+                        desc: 'RISC-V Siêu nhỏ gọn',
+                        badge: 'Low Power',
+                      },
+                    ].map((b) => (
+                      <button
+                        key={b.type}
+                        type="button"
+                        onClick={() => handleSelectDeviceType(b.type)}
+                        className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer ${
+                          deviceType === b.type
+                            ? 'border-emerald-500 bg-emerald-50/70 text-emerald-950 ring-1 ring-emerald-500 font-medium'
+                            : 'border-slate-200 hover:border-slate-300 bg-white text-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold">{b.name}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-medium">
+                            {b.badge}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5">{b.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
                     Tên Trạm / Thiết Bị *
                   </label>
                   <input
@@ -492,7 +557,7 @@ export const DevicesProvisioningView: React.FC<DevicesProvisioningViewProps> = (
                     value={customDeviceId}
                     onChange={(e) => setCustomDeviceId(e.target.value)}
                     className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-300 rounded-lg font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-                    placeholder="ESP32S3_NODE_02"
+                    placeholder="ESP32S2_NODE_02"
                   />
                   <span className="text-[11px] text-slate-500 mt-1 block">
                     Được sử dụng làm định danh duy nhất gửi dữ liệu lên Hub.

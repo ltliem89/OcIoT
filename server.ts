@@ -615,12 +615,13 @@ app.post('/api/v1/devices/:id/commands/:commandId/ack', (req, res) => {
 // 5. Device Provisioning Wizard & Key Management
 app.post('/api/v1/provision/devices', (req, res) => {
   try {
-    const { name, deviceId, templateId, projectId } = req.body;
+    const { name, deviceId, templateId, projectId, deviceType } = req.body;
     if (!name) {
       return res.status(400).json({ success: false, error: 'Tên thiết bị là bắt buộc' });
     }
 
-    const finalDeviceId = deviceId?.trim() || `ESP32S3_NODE_${Math.floor(1000 + Math.random() * 9000)}`;
+    const typePrefix = deviceType === 'ESP32_S2' ? 'ESP32S2' : deviceType === 'ESP32_C3' ? 'ESP32C3' : deviceType === 'ESP32' ? 'ESP32' : 'ESP32S3';
+    const finalDeviceId = deviceId?.trim() || `${typePrefix}_NODE_${Math.floor(1000 + Math.random() * 9000)}`;
 
     // Generate cryptographic device key: dvk_live_<32 hex chars>
     const randomHex = crypto.randomBytes(16).toString('hex');
@@ -628,13 +629,16 @@ app.post('/api/v1/provision/devices', (req, res) => {
     const keyHash = `sha256:${crypto.createHash('sha256').update(deviceKey).digest('hex').substring(0, 16)}`;
     const token = crypto.randomBytes(8).toString('hex');
 
+    const resolvedType = (deviceType as any) || (finalDeviceId.includes('S2') ? 'ESP32_S2' : finalDeviceId.includes('C3') ? 'ESP32_C3' : finalDeviceId.includes('ESP32_') ? 'ESP32' : 'ESP32_S3');
+    const resolvedFw = resolvedType === 'ESP32_S2' ? 'v4.1.2-esp32s2' : resolvedType === 'ESP32_C3' ? 'v4.1.2-esp32c3' : resolvedType === 'ESP32' ? 'v4.1.2-esp32' : 'v4.1.2-esp32s3';
+
     const newDevice: Device = {
       id: finalDeviceId,
       projectId: projectId || currentProject.id,
       name,
-      type: 'ESP32_S3',
+      type: resolvedType,
       templateId: templateId || 'tmpl_aquaponics_v1',
-      firmwareVersion: 'v4.1.2-esp32s3',
+      firmwareVersion: resolvedFw,
       currentConfigVersion: currentProject.activeConfigVersion,
       configHash: `cfg_${Date.now().toString(16)}`,
       online: false,
@@ -770,7 +774,7 @@ app.get('/api/v1/devices/:id/firmware-sketch', (req, res) => {
   const serverEndpoint = (req.query.serverEndpoint as string) || `${protocol}://${host}`;
 
   // Read configuration options
-  const board = ((req.query.board as string) || 'esp32s3').toLowerCase(); // 'esp32s3' | 'esp32' | 'esp32c3' | 'esp32_xiao'
+  const board = ((req.query.board as string) || 'esp32s3').toLowerCase(); // 'esp32s3' | 'esp32s2' | 'esp32' | 'esp32c3' | 'esp32_xiao'
   const powerProfile = ((req.query.powerProfile as string) || 'continuous').toLowerCase(); // 'continuous' | 'modem_sleep' | 'solar_sleep'
   const wifiSsid = (req.query.wifiSsid as string) || 'YOUR_WIFI_NAME';
   const wifiPassword = (req.query.wifiPassword as string) || 'YOUR_WIFI_PASSWORD';
@@ -827,6 +831,18 @@ app.get('/api/v1/devices/:id/firmware-sketch', (req, res) => {
       pinBuzzer: 18,
       supportsDualCore: true,
     };
+  } else if (board === 'esp32s2') {
+    pinoutConfig = {
+      boardName: 'ESP32-S2 DevKit (Saola-1 / WROOM / WROVER)',
+      pinTds: 4,      // ADC1_CH3 (Kênh ADC1 an toàn khi WiFi bật)
+      pinMoisture: 5, // ADC1_CH4 (Kênh ADC1 an toàn khi WiFi bật)
+      pinFloatLow: 11,
+      pinFloatHigh: 12,
+      pinPump1: 17,
+      pinPump2: 18,
+      pinBuzzer: 21,
+      supportsDualCore: false,
+    };
   } else if (board === 'esp32c3') {
     pinoutConfig = {
       boardName: 'ESP32-C3 SuperMini (RISC-V Single Core)',
@@ -859,11 +875,18 @@ app.get('/api/v1/devices/:id/firmware-sketch', (req, res) => {
   MÃ NGUỒN C++ TOÀN DIỆN CHO BO MẠCH VI ĐIỀU KHIỂN ESP32
   ====================================================================================================
   Bo Mạch:            ${pinoutConfig.boardName}
+  Kiến Trúc Chip:     ${board === 'esp32s2' ? 'Xtensa LX7 Single-Core 240MHz (Hỗ trợ USB OTG Native)' : board === 'esp32c3' ? 'RISC-V Single-Core 160MHz' : 'Xtensa Dual-Core 240MHz'}
   Mã Trạm (Device ID): ${deviceId}
   Khóa Bảo Mật:       ${activeKey}
   Chế Độ Năng Lượng:  ${powerProfile === 'continuous' ? 'ĐIỆN LƯỚI LIÊN TỤC (Độ trễ thấp, xử lý tức thì)' : powerProfile === 'modem_sleep' ? 'TIẾT KIỆM NĂNG LƯỢNG (WiFi Modem Sleep - Giảm 60% điện, chip mát 38°C)' : 'PIN / NĂNG LƯỢNG MẶT TRỜI (Light Sleep đánh thức theo chu kỳ và phao khẩn)'}
   Máy Chủ Hub Web:    ${serverEndpoint}
   ====================================================================================================
+  ${board === 'esp32s2' ? `
+  ⚡ LƯU Ý ĐẶC BIỆT KHI NẠP ESP32-S2 (ARDUINO IDE):
+    1. Menu Tools -> Board -> Chọn "ESP32S2 Dev Module" (hoặc "ESP32-S2 Saola 1").
+    2. Menu Tools -> USB CDC On Boot -> Chọn "Enabled" (Rất quan trọng để Serial Monitor hiển thị log qua cổng Type-C native).
+    3. Cảm biến Analog: Chân TDS (GPIO 4) và Độ ẩm đất (GPIO 5) đều thuộc ADC1, an toàn tuyệt đối khi bật WiFi.
+  ====================================================================================================` : ''}
   
   ====================================================================================================
   📖 BẢNG TRA CỨU: CHỖ NÀO CHỈNH ĐƯỢC & CHỈNH RA SAO (HƯỚNG DẪN NGƯỜI DÙNG)

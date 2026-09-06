@@ -112,6 +112,7 @@ export async function provisionV4Device(payload: {
   deviceId?: string;
   templateId?: string;
   projectId?: string;
+  deviceType?: string;
 }): Promise<{ success: boolean; result: ProvisioningResult }> {
   const res = await fetch('/api/v1/provision/devices', {
     method: 'POST',

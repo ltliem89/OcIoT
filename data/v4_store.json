@@ -273,9 +273,9 @@
       "firmwareVersion": "v4.1.2-esp32s3",
       "currentConfigVersion": 1,
       "configHash": "hash_esp_7a8f1b2c",
-      "online": true,
+      "online": false,
       "lastHeartbeat": "2026-09-05T13:24:50.342Z",
-      "lastTelemetry": "2026-09-05T13:39:17.413Z",
+      "lastTelemetry": "2026-09-05T23:53:17.375Z",
       "rssi": -62,
       "ipAddress": "192.168.1.108",
       "credentials": [
@@ -315,6 +315,76 @@
         }
       ],
       "activeKey": "dvk_live_aipc_vision_4f8b2c1e7a"
+    },
+    {
+      "id": "ESP32S3_NODE_3616",
+      "projectId": "proj_eco_01",
+      "name": "Trạm Vệ Tinh Hồ Nuôi 3",
+      "type": "ESP32_S3",
+      "templateId": "tmpl_aquaponics_v1",
+      "firmwareVersion": "v4.1.2-esp32s3",
+      "currentConfigVersion": 1,
+      "configHash": "cfg_1a07432ea81",
+      "online": false,
+      "lastHeartbeat": "2026-09-06T00:51:29.025Z",
+      "lastTelemetry": "2026-09-06T00:51:29.025Z",
+      "rssi": -65,
+      "credentials": [
+        {
+          "deviceId": "ESP32S3_NODE_3616",
+          "keyHash": "sha256:0f2a2770683e42ff",
+          "keyVersion": 1,
+          "status": "ACTIVE",
+          "createdAt": "2026-09-06T00:51:29.025Z"
+        }
+      ],
+      "activeKey": "dvk_live_esp32s3_node_3616_0f2a2770"
+    },
+    {
+      "id": "ESP32S3_NODE_4749",
+      "projectId": "proj_eco_01",
+      "name": "Test ESP32",
+      "type": "ESP32_S3",
+      "templateId": "tmpl_aquaponics_v1",
+      "firmwareVersion": "v4.1.2-esp32s3",
+      "currentConfigVersion": 1,
+      "configHash": "cfg_1a074437097",
+      "online": false,
+      "lastHeartbeat": "2026-09-06T01:09:31.927Z",
+      "lastTelemetry": "2026-09-06T01:09:31.927Z",
+      "rssi": -65,
+      "credentials": [
+        {
+          "deviceId": "ESP32S3_NODE_4749",
+          "keyHash": "sha256:91ae9af9c87166c0",
+          "keyVersion": 1,
+          "status": "ACTIVE",
+          "createdAt": "2026-09-06T01:09:31.927Z"
+        }
+      ]
+    },
+    {
+      "id": "ESP32S3_NODE_1701",
+      "projectId": "proj_eco_01",
+      "name": "Trạm ESP32 Test Vercel",
+      "type": "ESP32_S3",
+      "templateId": "tmpl_aquaponics_v1",
+      "firmwareVersion": "v4.1.2-esp32s3",
+      "currentConfigVersion": 1,
+      "configHash": "cfg_1a07445c52c",
+      "online": false,
+      "lastHeartbeat": "2026-09-06T01:12:04.652Z",
+      "lastTelemetry": "2026-09-06T01:12:04.652Z",
+      "rssi": -65,
+      "credentials": [
+        {
+          "deviceId": "ESP32S3_NODE_1701",
+          "keyHash": "sha256:d0b6b06b38d10189",
+          "keyVersion": 1,
+          "status": "ACTIVE",
+          "createdAt": "2026-09-06T01:12:04.652Z"
+        }
+      ]
     }
   ],
   "versions": [
@@ -617,6 +687,33 @@
   ],
   "auditLogs": [
     {
+      "id": "aud_1788657124652",
+      "who": "System Admin",
+      "what": "Cấp mới thiết bị ESP32: Trạm ESP32 Test Vercel (ESP32S3_NODE_1701)",
+      "when": "2026-09-06T01:12:04.652Z",
+      "projectId": "proj_eco_01",
+      "deviceId": "ESP32S3_NODE_1701",
+      "configVersion": 1
+    },
+    {
+      "id": "aud_1788656971927",
+      "who": "System Admin",
+      "what": "Cấp mới thiết bị ESP32: Test ESP32 (ESP32S3_NODE_4749)",
+      "when": "2026-09-06T01:09:31.927Z",
+      "projectId": "proj_eco_01",
+      "deviceId": "ESP32S3_NODE_4749",
+      "configVersion": 1
+    },
+    {
+      "id": "aud_1788655889025",
+      "who": "System Admin",
+      "what": "Cấp mới thiết bị ESP32: Trạm Vệ Tinh Hồ Nuôi 3 (ESP32S3_NODE_3616)",
+      "when": "2026-09-06T00:51:29.025Z",
+      "projectId": "proj_eco_01",
+      "deviceId": "ESP32S3_NODE_3616",
+      "configVersion": 1
+    },
+    {
       "id": "aud_001",
       "who": "System Architect",
       "what": "Cấu hình và kích hoạt phiên bản Active Config Version v1",
@@ -656,9 +753,9 @@
     "cameraStreamUrl": "",
     "aiSensitivity": "medium",
     "googleSheetsWebhookUrl": "https://script.google.com/macros/s/AKfycbwHPmudIqq_eRZbIIzUi-c2ndZAS8a7BY8XyvE678wKfB4KxMEoRoCPJl1WDRWGd-AI/exec",
-    "lastSheetsSyncTime": "2026-09-05T13:59:46.028Z",
+    "lastSheetsSyncTime": "2026-09-06T00:51:17.424Z",
     "lastSheetsSyncStatus": "SUCCESS",
-    "lastSheetsSyncMessage": "Đã đồng bộ thành công lên Google Sheets lúc 13:59:48"
+    "lastSheetsSyncMessage": "Tự động đồng bộ thành công lúc 00:51:19"
   },
   "devicePlainKeys": {
     "ESP32S3_ECO_01": "dvk_live_eco_01_a9f4c82b7e1039d",

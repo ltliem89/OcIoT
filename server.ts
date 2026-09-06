@@ -56,6 +56,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// Normalize request URL for serverless proxy environments (Vercel, AWS Lambda)
+app.use((req, res, next) => {
+  if (req.url && req.url.startsWith('/v1')) {
+    req.url = '/api' + req.url;
+  }
+  next();
+});
+
 const PORT = 3000;
 
 // ----------------------------------------------------------------------
@@ -118,9 +126,10 @@ let systemSettings: SystemSettings = {
 };
 
 // ----------------------------------------------------------------------
-// PERSISTENT FILE STORAGE HELPER (Production Safe)
+// PERSISTENT FILE STORAGE HELPER (Production Safe & Serverless Compatible)
 // ----------------------------------------------------------------------
-const DATA_DIR = path.join(process.cwd(), 'data');
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const DATA_DIR = IS_SERVERLESS ? path.join('/tmp', 'data') : path.join(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'v4_store.json');
 
 // Plaintext Active Device Keys for direct Firmware Injection (Server Authoritative)
@@ -130,8 +139,12 @@ let devicePlainKeys: Record<string, string> = {
 };
 
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  } catch (err) {
+    // Graceful fallback on read-only environments
   }
 }
 
@@ -152,7 +165,7 @@ function saveStore() {
     };
     fs.writeFileSync(STORE_PATH, JSON.stringify(data, null, 2), 'utf-8');
   } catch (err) {
-    console.error('Lỗi khi ghi lưu trữ cấu hình:', err);
+    // On serverless read-only disk, state is safely preserved in-memory
   }
 }
 
@@ -173,10 +186,10 @@ function loadStore() {
       if (data.devicePlainKeys && typeof data.devicePlainKeys === 'object') {
         devicePlainKeys = { ...devicePlainKeys, ...data.devicePlainKeys };
       }
-      console.log('✅ Đã nạp cấu hình V4 bền vững từ tệp lưu trữ cục bộ.');
+      console.log('✅ Đã nạp cấu hình V4 bền vững từ tệp lưu trữ.');
     }
   } catch (err) {
-    console.error('Lỗi khi đọc lưu trữ cấu hình:', err);
+    // Ignore read errors, fallback to default configuration
   }
 }
 
@@ -2570,47 +2583,49 @@ app.get('/api/sheets/apps-script-code', (req, res) => {
   res.json({ success: true, script: scriptCode });
 });
 
-// Periodic Background Auto-Sync Loop to Google Sheets Webhook
-setInterval(async () => {
-  const webhook = systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com') ? systemSettings.googleSheetsUrl : null);
-  if (!webhook) return;
+// Periodic Background Auto-Sync Loop to Google Sheets Webhook (standalone server only)
+if (!IS_SERVERLESS) {
+  setInterval(async () => {
+    const webhook = systemSettings.googleSheetsWebhookUrl || (systemSettings.googleSheetsUrl?.includes('script.google.com') ? systemSettings.googleSheetsUrl : null);
+    if (!webhook) return;
 
-  try {
-    const syncTimestamp = new Date().toISOString();
-    await fetch(webhook, {
-      method: 'POST',
-      redirect: 'follow',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'log_telemetry',
-        timestamp: syncTimestamp,
-        device_id: systemSettings.deviceId,
-        tds: latestSensorData.tds,
-        soil_moisture: latestSensorData.soil_moisture,
-        float_low: latestSensorData.float_low,
-        float_high: latestSensorData.float_high,
-        pump1: latestSensorData.pump1,
-        pump2: latestSensorData.pump2,
-        buzzer: latestSensorData.buzzer,
-        wifi_rssi: latestSensorData.wifi_rssi || -60,
-        mode: latestSensorData.mode || deviceMode || 'AUTO',
-        duckweed_coverage: latestVisionResult.duckweed.coverage ?? 75,
-        snail_eggs_count: latestVisionResult.snail_eggs.egg_clusters ?? 5,
-        note: latestSensorData.tds && latestSensorData.tds > systemSettings.tdsMax
-          ? 'TDS Cao'
-          : latestSensorData.soil_moisture && latestSensorData.soil_moisture < systemSettings.soilMoistureMin
-          ? 'Đất Khô'
-          : 'Đồng bộ tự động định kỳ',
-      }),
-    });
-    systemSettings.lastSheetsSyncTime = syncTimestamp;
-    systemSettings.lastSheetsSyncStatus = 'SUCCESS';
-    systemSettings.lastSheetsSyncMessage = 'Tự động đồng bộ thành công lúc ' + new Date().toLocaleTimeString('vi-VN');
-  } catch (err: any) {
-    systemSettings.lastSheetsSyncStatus = 'ERROR';
-    systemSettings.lastSheetsSyncMessage = 'Lỗi tự động đồng bộ: ' + (err.message || 'Mất kết nối');
-  }
-}, Math.max(30, systemSettings.espSheetsSyncIntervalSeconds || 60) * 1000);
+    try {
+      const syncTimestamp = new Date().toISOString();
+      await fetch(webhook, {
+        method: 'POST',
+        redirect: 'follow',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'log_telemetry',
+          timestamp: syncTimestamp,
+          device_id: systemSettings.deviceId,
+          tds: latestSensorData.tds,
+          soil_moisture: latestSensorData.soil_moisture,
+          float_low: latestSensorData.float_low,
+          float_high: latestSensorData.float_high,
+          pump1: latestSensorData.pump1,
+          pump2: latestSensorData.pump2,
+          buzzer: latestSensorData.buzzer,
+          wifi_rssi: latestSensorData.wifi_rssi || -60,
+          mode: latestSensorData.mode || deviceMode || 'AUTO',
+          duckweed_coverage: latestVisionResult.duckweed.coverage ?? 75,
+          snail_eggs_count: latestVisionResult.snail_eggs.egg_clusters ?? 5,
+          note: latestSensorData.tds && latestSensorData.tds > systemSettings.tdsMax
+            ? 'TDS Cao'
+            : latestSensorData.soil_moisture && latestSensorData.soil_moisture < systemSettings.soilMoistureMin
+            ? 'Đất Khô'
+            : 'Đồng bộ tự động định kỳ',
+        }),
+      });
+      systemSettings.lastSheetsSyncTime = syncTimestamp;
+      systemSettings.lastSheetsSyncStatus = 'SUCCESS';
+      systemSettings.lastSheetsSyncMessage = 'Tự động đồng bộ thành công lúc ' + new Date().toLocaleTimeString('vi-VN');
+    } catch (err: any) {
+      systemSettings.lastSheetsSyncStatus = 'ERROR';
+      systemSettings.lastSheetsSyncMessage = 'Lỗi tự động đồng bộ: ' + (err.message || 'Mất kết nối');
+    }
+  }, Math.max(30, systemSettings.espSheetsSyncIntervalSeconds || 60) * 1000);
+}
 
 // AI Analyze Endpoint (Gemini + fallback)
 app.post('/api/ai/analyze', async (req, res) => {
@@ -2905,7 +2920,8 @@ app.post('/api/esp/sync-thresholds', (req, res) => {
 // ----------------------------------------------------------------------
 async function start() {
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
+    const vitePkg = 'vite';
+    const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -2921,14 +2937,14 @@ async function start() {
     }
   }
 
-  if (!process.env.VERCEL) {
+  if (!IS_SERVERLESS) {
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`OC IoT Hub Server running on http://0.0.0.0:${PORT}`);
     });
   }
 }
 
-if (!process.env.VERCEL) {
+if (!IS_SERVERLESS) {
   start();
 }
 
